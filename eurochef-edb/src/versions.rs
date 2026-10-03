@@ -78,7 +78,18 @@ impl Platform {
             // swy: marked as PC; GC and XB are unfortunately also flagged as this, so we need to be sneaky
             if endian == Endian::Big {
                 // swy: the only big-endian CPU using these files in this EDB version is on GameCube/Wii
-                return Some(Self::GameCube);
+                // the flag is the same for both, the folder (_bin_wii, _bin_gc) tells them apart.
+                // without one: nothing from G-Force (259) on came out on the GameCube
+                let from_folder = path
+                    .as_ref()
+                    .iter()
+                    .rfind(|p| p.to_string_lossy().to_lowercase().starts_with("_bin_"))
+                    .and_then(|p| Self::from_shorthand(p.to_string_lossy().to_lowercase().get(5..)?));
+                return Some(match from_folder {
+                    Some(p @ (Self::GameCube | Self::Wii)) => p,
+                    _ if header.version >= EDB_VERSION_GFORCE => Self::Wii,
+                    _ => Self::GameCube,
+                });
             }
 
             if header.platform_versions[0] > 0 {
