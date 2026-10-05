@@ -17,6 +17,22 @@ fn main() -> Result<()> {
         /// hashcodes.h
         #[arg(long, short = 't')]
         hashcodes: Option<String>,
+
+        /// Save a picture of the window to this PNG and quit (for testing)
+        #[arg(long)]
+        screenshot: Option<String>,
+
+        /// The panel to show for --screenshot: info, text, textures, entities, scripts, maps
+        #[arg(long, default_value = "maps")]
+        panel: String,
+
+        /// Write the loaded file again with its triggers as they were read (for testing)
+        #[arg(long)]
+        save_triggers: Option<String>,
+
+        /// Frames to draw before the picture is taken
+        #[arg(long, default_value_t = 90)]
+        screenshot_after: u32,
     }
     let args = Args::parse();
 
@@ -29,7 +45,10 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let native_options = eframe::NativeOptions {
-        initial_window_size: Some([1280., 1024.].into()),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280., 1024.])
+            .with_app_id("eurochef")
+            .with_drag_and_drop(true),
         depth_buffer: 24,
         multisampling: 0,
         ..Default::default()
@@ -37,12 +56,15 @@ fn main() -> Result<()> {
     let res = eframe::run_native(
         "Eurochef",
         native_options,
-        Box::new(|cc| {
-            Box::new(eurochef_gui::EurochefApp::new(
-                args.file,
-                args.hashcodes,
-                cc,
-            ))
+        Box::new(move |cc| {
+            let mut app = eurochef_gui::EurochefApp::new(args.file, args.hashcodes, cc);
+            if let Some(path) = args.save_triggers {
+                app.save_triggers_request(path);
+            }
+            if let Some(path) = args.screenshot {
+                app.screenshot_request(path, &args.panel, args.screenshot_after);
+            }
+            Ok(Box::new(app))
         }),
     );
 
@@ -68,7 +90,7 @@ fn main() {
             .start(
                 "the_canvas_id", // hardcode it
                 web_options,
-                Box::new(|cc| Box::new(eurochef_gui::EurochefApp::new(None, None, cc))),
+                Box::new(|cc| Ok(Box::new(eurochef_gui::EurochefApp::new(None, None, cc)))),
             )
             .await
             .expect("failed to start eframe");

@@ -50,7 +50,7 @@ pub struct MapFrame {
     collision_renderer: Arc<CollisionDatumRenderer>,
     default_trigger_icon: glow::Texture,
     link_renderer: Arc<LinkLineRenderer>,
-    selected_trigger: Option<usize>,
+    pub(crate) selected_trigger: Option<usize>,
     selected_link: Option<i32>,
     select_renderer: Arc<SelectCubeRenderer>,
 
@@ -64,17 +64,29 @@ pub struct MapFrame {
     show_triggers: bool,
     pickbuffer: PickBuffer,
 
-    selected_map: usize,
+    pub(crate) selected_map: usize,
     trigger_scale: f32,
     trigger_focus_tween: Option<Tweeny3D>,
 
-    trigger_info: Arc<TriggerInformation>,
+    pub(crate) trigger_info: Arc<TriggerInformation>,
     selected_triginfo_path: String,
     available_triginfo_paths: Vec<String>,
 
     hashcodes: Arc<IntMap<u32, String>>,
     trigger_icons: Arc<FxHashMap<String, glow::Texture>>,
     render_filter: RenderFilter,
+}
+
+/// The folder with the trigger definitions and icons: `assets` next to the program, or the
+/// source tree's when the program was started from a cargo build
+pub fn assets_dir() -> std::path::PathBuf {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("assets")));
+    match beside {
+        Some(dir) if dir.is_dir() => dir,
+        _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets"),
+    }
 }
 
 const DEFAULT_ICON_DATA: &[u8] = include_bytes!("../../../assets/icons/triggers/default.png");
@@ -109,9 +121,8 @@ impl MapFrame {
         let (default_icon_data, default_icon_info) = load_png_frame(DEFAULT_ICON_DATA);
 
         let mut available_triginfo_paths = vec![];
-        let exe_path = std::env::current_exe().unwrap();
-        let exe_dir = exe_path.parent().unwrap();
-        if let Ok(d) = exe_dir.join("assets").read_dir() {
+        let assets = assets_dir();
+        if let Ok(d) = assets.read_dir() {
             available_triginfo_paths = d
                 .filter(|d| {
                     d.as_ref().unwrap().file_type().unwrap().is_file()
@@ -135,7 +146,7 @@ impl MapFrame {
         }
 
         let mut trigger_icons = FxHashMap::default();
-        if let Ok(d) = exe_dir.join("./assets/icons/triggers").read_dir() {
+        if let Ok(d) = assets.join("icons/triggers").read_dir() {
             for p in d
                 .filter(|d| d.as_ref().unwrap().file_type().unwrap().is_file())
                 .map(|d| {
@@ -149,7 +160,7 @@ impl MapFrame {
                 .filter(|d| d.to_lowercase().ends_with(".png"))
             {
                 let mut file =
-                    File::open(exe_dir.join("./assets/icons/triggers").join(&p)).unwrap();
+                    File::open(assets.join("icons/triggers").join(&p)).unwrap();
                 let mut decoder = png::Decoder::new(&mut file);
                 decoder.set_transformations(png::Transformations::normalize_to_color8());
                 let mut reader = decoder.read_info().unwrap();
@@ -216,11 +227,7 @@ impl MapFrame {
     }
 
     fn reload_trigger_defs(&mut self) -> anyhow::Result<()> {
-        let exe_path = std::env::current_exe().unwrap();
-        let exe_dir = exe_path.parent().unwrap();
-        let v = std::fs::read_to_string(
-            exe_dir.join(format!("./assets/{}", self.selected_triginfo_path)),
-        )?;
+        let v = std::fs::read_to_string(assets_dir().join(&self.selected_triginfo_path))?;
         self.trigger_info =
             serde_yaml::from_str(&v).context("Failed to load trigger definition file")?;
         self.trigger_scale = self.trigger_info.icon_scale;
@@ -310,7 +317,7 @@ impl MapFrame {
 
             ui.add(
                 egui::DragValue::new(&mut self.trigger_scale)
-                    .clamp_range(0.1..=2.0)
+                    .range(0.1..=2.0)
                     .max_decimals(2)
                     .speed(0.05),
             );
@@ -790,7 +797,7 @@ impl MapFrame {
     fn draw_trigger_inspector(&mut self, ctx: &egui::Context, map: &ProcessedMap) {
         let screen_space = ctx.screen_rect();
         egui::Window::new("Inspector")
-            .scroll2([false, true])
+            .scroll([false, true])
             .show(ctx, |ui| {
                 if self.selected_trigger.is_none() || !self.show_triggers {
                     ui.heading("No object selected");

@@ -72,6 +72,42 @@ pub struct EurochefApp {
     path_cache: IntMap<Hashcode, String>,
     render_store: Arc<RwLock<RenderStore>>,
     game: String,
+
+    /// --screenshot: the file, the panel to show, frames left until it is taken
+    screenshot: Option<(String, String, u32)>,
+
+    /// Where the pending file comes from, and the loaded file's path and bytes
+    pending_path: String,
+    current_source: Option<(String, Arc<Vec<u8>>)>,
+
+    new_map: Option<NewMapDialog>,
+    /// --save-triggers: write the loaded file's triggers back to this file (for testing)
+    save_triggers_to: Option<String>,
+}
+
+/// File > New GoldenEye 007 map: a level made from a glTF scene
+struct NewMapDialog {
+    gltf: String,
+    folder: String,
+    name: String,
+    id: u32,
+    scale: f32,
+    bake_light: bool,
+    status: String,
+}
+
+impl Default for NewMapDialog {
+    fn default() -> Self {
+        Self {
+            gltf: String::new(),
+            folder: String::new(),
+            name: "custom".to_string(),
+            id: 1,
+            scale: 1.0,
+            bake_light: true,
+            status: String::new(),
+        }
+    }
 }
 
 impl EurochefApp {
@@ -101,11 +137,8 @@ impl EurochefApp {
             use glow::HasContext;
             let gl = cc.gl.as_ref().unwrap();
 
+            // The debug callback needs exclusive access to the context, which eframe shares
             gl.enable(glow::DEBUG_OUTPUT);
-            gl.enable(glow::DEBUG_OUTPUT_SYNCHRONOUS);
-            gl.debug_message_callback(|source, ty, id, severity, msg| {
-                println!("OpenGL s={source} t={ty} i={id} s={severity}: {msg}");
-            });
             gl.debug_message_control(glow::DONT_CARE, glow::DONT_CARE, glow::DONT_CARE, &[], true);
         }
 
@@ -136,6 +169,11 @@ impl EurochefApp {
             hashcodes: Arc::new(hashcodes),
             game: String::new(),
             show_profiler: false,
+            screenshot: None,
+            pending_path: String::new(),
+            current_source: None,
+            new_map: None,
+            save_triggers_to: None,
         };
 
         if let Some(path) = path {
@@ -148,6 +186,182 @@ impl EurochefApp {
         }
 
         s
+    }
+
+    pub fn save_triggers_request(&mut self, path: String) {
+        self.save_triggers_to = Some(path);
+    }
+
+    /// The window of File > New GoldenEye 007 map
+    fn show_new_map(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.new_map.as_mut() else {
+            return;
+        };
+        let mut open = true;
+        let mut create = false;
+        egui::Window::new("New GoldenEye 007 map")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("A level file (mt_NAME.edb) is made from a glTF scene: its triangles, its textures, the collision and the player's spawn point.");
+                ui.add_space(4.0);
+                egui::Grid::new("new_map").num_columns(3).show(ui, |ui| {
+                    ui.label("Scene");
+                    ui.add(egui::TextEdit::singleline(&mut dialog.gltf).desired_width(320.0).hint_text(".gltf or .glb"));
+                    if ui.button("Browse").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("glTF", &["gltf", "glb"]).pick_file() {
+                            dialog.gltf = path.to_string_lossy().to_string();
+                            if dialog.name == "custom" {
+                                if let Some(stem) = path.file_stem() {
+                                    dialog.name = stem.to_string_lossy().to_lowercase();
+                                }
+                            }
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Folder");
+                    ui.add(egui::TextEdit::singleline(&mut dialog.folder).desired_width(320.0).hint_text("the game's mods folder"));
+                    if ui.button("Browse").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            dialog.folder = path.to_string_lossy().to_string();
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut dialog.name);
+                    ui.end_row();
+
+                    ui.label("Level number");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut dialog.id).range(0..=0xDFF));
+                        ui.label(format!(
+                            "level {:08X}",
+                            eurochef_shared::ge::level::level_hash(dialog.id)
+                        ));
+                    });
+                    ui.end_row();
+
+                    ui.label("Scale");
+                    ui.add(egui::DragValue::new(&mut dialog.scale).speed(0.01).range(0.001..=1000.0));
+                    ui.end_row();
+
+                    ui.label("Light");
+                    ui.checkbox(&mut dialog.bake_light, "Shade the vertex colours from above");
+                    ui.end_row();
+                });
+                ui.add_space(4.0);
+                ui.label("Meshes named collision..., col_... or ucx_... are collided with and not drawn. Without any, the drawn triangles are collided with (not those of a material named ...nocollide...). A node named spawn... is where the player starts.");
+                ui.add_space(4.0);
+                create = ui
+                    .add_enabled(
+                        !dialog.gltf.is_empty() && !dialog.folder.is_empty(),
+                        egui::Button::new("Create"),
+                    )
+                    .clicked();
+                if !dialog.status.is_empty() {
+                    ui.label(&dialog.status);
+                }
+            });
+
+        if create {
+            use eurochef_shared::ge::{gltf_import::ImportOptions, project};
+            let options = project::NewMapOptions {
+                name: dialog.name.clone(),
+                id: dialog.id,
+                spawn: None,
+                import: ImportOptions {
+                    scale: dialog.scale,
+                    bake_light: dialog.bake_light,
+                },
+            };
+            let made = project::new_map_from_gltf(&dialog.gltf, &options).and_then(|map| {
+                let path = map.save(&dialog.folder)?;
+                Ok((path, map))
+            });
+            match made {
+                Ok((path, map)) => {
+                    dialog.status = format!(
+                        "Wrote {} (level {:08X}): {} triangles, {} collided with, {} textures. Start the game with GE_LEVEL={:08X}.",
+                        path.display(),
+                        map.level_hash,
+                        map.stats.drawn_triangles,
+                        map.stats.collision_triangles,
+                        map.stats.textures,
+                        map.level_hash
+                    );
+                    if let Err(e) = self.load_file_with_path(&path) {
+                        self.state = AppState::Error(e);
+                    }
+                }
+                Err(e) => dialog.status = format!("Not made: {e:#}"),
+            }
+        }
+        if !open {
+            self.new_map = None;
+        }
+    }
+
+    pub fn screenshot_request(&mut self, path: String, panel: &str, after_frames: u32) {
+        self.screenshot = Some((path, panel.to_lowercase(), after_frames.max(2)));
+    }
+
+    /// Counts down to the requested screenshot, saves it when it arrives and closes the window
+    fn update_screenshot(&mut self, ctx: &egui::Context) {
+        let Some((path, panel, frames_left)) = self.screenshot.as_mut() else {
+            return;
+        };
+
+        if self.pending_file.is_none() && self.fileinfo.is_some() {
+            let wanted = match panel.as_str() {
+                "info" => Some(Panel::FileInfo),
+                "text" if self.spreadsheetlist.is_some() => Some(Panel::Spreadsheets),
+                "textures" if self.textures.is_some() => Some(Panel::Textures),
+                "entities" if self.entities.is_some() => Some(Panel::Entities),
+                "scripts" if self.scripts.is_some() => Some(Panel::Scripts),
+                "maps" if self.maps.is_some() => Some(Panel::Maps),
+                _ => None,
+            };
+            if let Some(wanted) = wanted {
+                self.current_panel = wanted;
+            }
+        }
+
+        if *frames_left > 1 {
+            *frames_left -= 1;
+            ctx.request_repaint();
+        } else if *frames_left == 1 {
+            *frames_left = 0;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+            ctx.request_repaint();
+        }
+
+        let image = ctx.input(|i| {
+            i.raw.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let res = std::fs::File::create(&*path).map(|f| {
+                let mut encoder =
+                    png::Encoder::new(std::io::BufWriter::new(f), image.width() as u32, image.height() as u32);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .and_then(|mut w| w.write_image_data(bytemuck::cast_slice(&image.pixels)))
+            });
+            match res {
+                Ok(Ok(())) => info!("Saved screenshot to {path}"),
+                Ok(Err(e)) => error!("Failed to write screenshot {path}: {e}"),
+                Err(e) => error!("Failed to create screenshot {path}: {e}"),
+            }
+            self.screenshot = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     // TODO: Error handling
@@ -197,6 +411,7 @@ impl EurochefApp {
             info!("Indexed {} EDBs", self.path_cache.len());
         }
 
+        self.pending_path = path.as_ref().to_string_lossy().to_string();
         let mut f = File::open(path)?;
         let mut data = vec![];
         f.read_to_end(&mut data)?;
@@ -319,6 +534,16 @@ impl EurochefApp {
         self.scripts = None;
 
         self.fileinfo = Some(fileinfo::FileInfoPanel::new(edb.header.clone()));
+
+        // a file on its own, outside the game's folders: version 263 on the Wii is taken for
+        // GoldenEye 007, whose folder is bondx
+        if DissectedFilelistPath::dissect(&self.pending_path).is_none() {
+            self.game = if header.version == 263 && platform == Platform::Wii {
+                "bondx".to_string()
+            } else {
+                String::new()
+            };
+        }
 
         let spreadsheets = UXGeoSpreadsheet::read_all(&mut edb)?;
         if !spreadsheets.is_empty() {
@@ -452,24 +677,42 @@ impl eframe::App for EurochefApp {
             });
 
         if let Some((data, load_path)) = self.load_input.take() {
-            let platform = Platform::from_path(load_path);
+            let platform = Platform::from_path(&load_path);
+            self.pending_path = load_path;
             self.pending_file = Some((data, platform));
         }
 
         if let Some((data, platform)) = self.pending_file.as_ref() {
             if let Some(platform) = platform {
                 let cur = Cursor::new(data.clone()); // FIXME: Cloning the data hurts my soul
+                let source = (self.pending_path.clone(), Arc::new(data.clone()));
                 match self.load_file(*platform, Box::new(cur), ctx) {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        if let Some(maps) = self.maps.as_mut() {
+                            maps.set_source(source.0.clone(), source.1.clone());
+                        }
+                        self.current_source = Some(source);
+                    }
                     Err(e) => {
                         self.state = AppState::Error(e);
                     }
                 }
                 self.pending_file = None;
+
+                if let Some(target) = self.save_triggers_to.take() {
+                    match self.maps.as_ref().map(|m| m.save_triggers(std::path::Path::new(&target))) {
+                        Some(Ok(size)) => info!("Wrote the triggers back: {target} ({size} bytes)"),
+                        Some(Err(e)) => error!("Couldn't write {target}: {e:#}"),
+                        None => error!("Couldn't write {target}: the file has no map"),
+                    }
+                }
             } else {
                 self.state = AppState::SelectPlatform;
             }
         }
+
+        self.update_screenshot(ctx);
+        self.show_new_map(ctx);
 
         let Self {
             state,
@@ -557,6 +800,10 @@ impl eframe::App for EurochefApp {
                         ui.close_menu()
                     }
                 });
+
+                if ui.button("New GoldenEye 007 map").clicked() {
+                    self.new_map.get_or_insert_with(NewMapDialog::default);
+                }
 
                 if ui.button("Profiler").clicked() {
                     self.show_profiler = true;
