@@ -284,7 +284,7 @@ impl EntityListPanel {
                                 .allocate_exact_size(egui::vec2(256., 256.), egui::Sense::click());
 
                             ui.painter()
-                                .rect_filled(rect, egui::Rounding::none(), Color32::BLACK);
+                                .rect_filled(rect, egui::Rounding::ZERO, Color32::BLACK);
 
                             ui.painter().text(
                                 rect.left_top() + egui::vec2(24., 24.),
@@ -306,7 +306,7 @@ impl EntityListPanel {
                         }
 
                         let response = if let Some(Some(tex)) = self.entity_previews.get(i) {
-                            egui::Image::new(tex.id(), [256., 256.])
+                            egui::Image::new((tex.id(), egui::vec2(256., 256.)))
                                 .uv(egui::Rect::from_min_size(
                                     egui::Pos2::ZERO,
                                     [1.0, 1.0].into(),
@@ -626,9 +626,11 @@ impl EntityListPanel {
                         .copy_from_slice(&out[i..i + self.preview_size as usize * 4]);
                 }
 
-                let image = egui::ImageData::Color(egui::ColorImage::from_rgba_unmultiplied(
-                    [self.preview_size as usize, self.preview_size as usize],
-                    &out_flipped,
+                let image = egui::ImageData::Color(Arc::new(
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [self.preview_size as usize, self.preview_size as usize],
+                        &out_flipped,
+                    ),
                 ));
                 *t = Some(context.load_texture(
                     hc.to_string(),

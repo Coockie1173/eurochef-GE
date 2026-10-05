@@ -130,7 +130,8 @@ impl TextItemList {
                         body.rows(
                             text_height,
                             filtered_items[self.selected_section].len(),
-                            |row_index, mut row| {
+                            |mut row| {
+                                let row_index = row.index();
                                 let item = filtered_items[self.selected_section][row_index];
                                 let context_menu = |ui: &mut egui::Ui| {
                                     if ui.button("Copy hashcode").clicked() {
@@ -162,7 +163,7 @@ impl TextItemList {
                                 .context_menu(context_menu);
 
                                 row.col(|ui| {
-                                    ui.style_mut().wrap = Some(false);
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                                     ui.label(&item.text.replace('\n', "\\n"));
                                 })
                                 .1

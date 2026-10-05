@@ -1,7 +1,7 @@
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
     io::Write,
-    panic::PanicInfo,
+    panic::PanicHookInfo,
 };
 
 use crate::strip_ansi_codes;
@@ -42,7 +42,7 @@ pub fn setup() {
     }))
 }
 
-fn write_panic_to_file(info: &PanicInfo<'_>, bt: Backtrace) -> std::io::Result<()> {
+fn write_panic_to_file(info: &PanicHookInfo<'_>, bt: Backtrace) -> std::io::Result<()> {
     let mut f = std::fs::File::create("panic.log")?;
 
     writeln!(f, "{}", info)?;

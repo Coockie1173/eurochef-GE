@@ -118,7 +118,7 @@ impl TextureList {
 
                                 let diagnostics = t.diagnostics.to_strings();
 
-                                let response = egui::Image::new(current, egui::vec2(128., 128.) * self.zoom).sense(egui::Sense::click()).ui(ui)
+                                let response = egui::Image::new((current.id(), egui::vec2(128., 128.) * self.zoom)).sense(egui::Sense::click()).ui(ui)
                                 .on_hover_ui(|ui| {
                                     ui.label(format!(
                                         "Hashcode: {:08x}\nFormat (internal): 0x{:x}\nDimensions: {}x{}{}\nScroll: {} {}\nFlags: 0x{:x}\nGameflags: 0x{:x}\nIndex: {i}\n",
@@ -164,7 +164,7 @@ impl TextureList {
                                 ui.allocate_exact_size(egui::vec2(128., 128.) * self.zoom, egui::Sense::click());
                                 ui.painter().rect_filled(
                                     rect,
-                                    egui::Rounding::none(),
+                                    egui::Rounding::ZERO,
                                     Color32::BLACK,
                                 );
 
@@ -190,7 +190,7 @@ impl TextureList {
 
                                 let (rect, response) = ui.allocate_exact_size(egui::vec2(128., 128.) * self.zoom, egui::Sense::click());
                                 ui.painter().rect_filled(rect,
-                                    egui::Rounding::none(),
+                                    egui::Rounding::ZERO,
                                     Color32::BLACK,
                                 );
 
@@ -242,7 +242,7 @@ impl TextureList {
 
                         self.enlarged_zoom *= ctx.input(|i| i.zoom_delta());
 
-                        egui::Image::new(current, current.size_vec2() * self.enlarged_zoom).ui(ui);
+                        egui::Image::new((current.id(), current.size_vec2() * self.enlarged_zoom)).ui(ui);
 
                         // TODO(cohae): Animation checkbox, when unticked, show frame slider
                     });

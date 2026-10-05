@@ -127,7 +127,8 @@ impl FileInfoPanel {
                     body.rows(
                         text_height,
                         self.external_references.len(),
-                        |row_index, mut row| {
+                        |mut row| {
+                            let row_index = row.index();
                             let (file_hashcode, object_hashcode) =
                                 &self.external_references[row_index];
                             row.col(|ui| {

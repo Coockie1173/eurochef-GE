@@ -122,7 +122,7 @@ impl ScriptListPanel {
                     self.viewer.lock().show_toolbar(ui);
                     ui.add(
                         egui::DragValue::new(&mut self.playback_speed)
-                            .clamp_range(0.05..=3.0)
+                            .range(0.05..=3.0)
                             .speed(0.01),
                     );
                     ui.label("Speed");
