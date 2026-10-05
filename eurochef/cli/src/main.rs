@@ -3,6 +3,7 @@ extern crate tracing;
 
 mod edb;
 mod filelist;
+mod ge;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -58,6 +59,11 @@ enum Command {
     Edb {
         #[command(subcommand)]
         subcommand: EdbCommand,
+    },
+    /// GoldenEye 007 (Wii): new maps from glTF scenes, triggers
+    Ge {
+        #[command(subcommand)]
+        subcommand: ge::GeCommand,
     },
 }
 
@@ -203,6 +209,7 @@ pub fn main() -> anyhow::Result<()> {
     match &args.cmd {
         Command::Filelist { subcommand } => handle_filelist(subcommand.clone()),
         Command::Edb { subcommand } => handle_edb(subcommand.clone()),
+        Command::Ge { subcommand } => ge::execute_command(subcommand.clone()),
     }
 }
 
