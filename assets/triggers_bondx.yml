@@ -1,0 +1,35 @@
+# GoldenEye 007 (Wii, 2010). The game's folder is bondx, so this file is picked on its own.
+# The types that are named here are the ones whose values are known: a level's hash names its
+# mt_ file, whose triggers place the player (0x1C) and load the geometry's map (0x3E).
+icon_scale: 1.25
+triggers:
+  0:
+    name: OB_Static
+    icon: OB_Static
+  0x1C:
+    name: SP_Spawn
+    icon: PL_StartPoint
+    values:
+      1: { name: Unk04, type: u32 }
+      2: { name: Unk08, type: hashcode }
+      3: { name: Unk0C, type: u32 }
+      4: { name: Unk10, type: float }
+      5: { name: Unk14, type: float }
+      6: { name: Unk18, type: float }
+      7: { name: Unk1C, type: float }
+      9: { name: Unk20, type: float }
+
+  0x35:
+    name: MP_Spawn
+    icon: PL_StartPoint
+    values:
+      0: { name: Unk00, type: u32 }
+      1: { name: Unk04, type: u32 }
+      3: { name: Unk08, type: u32 }
+
+  0x3E:
+    name: TR_LoadMap
+    icon: TR_Link
+    values:
+      0: { name: File, type: hashcode }
+      1: { name: Map, type: hashcode }
