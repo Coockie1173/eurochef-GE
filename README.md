@@ -14,6 +14,7 @@ Eurochef provides tools and Rust crates for working with Eurocom EngineX(T) file
   * [x] Blender plugin
 * [x] Filelist re-packer
 * [x] GUI viewer tool (WIP)
+* [x] GoldenEye 007 (Wii): new levels from glTF scenes (geometry, textures, collision), triggers moved, added and removed, see [docs/goldeneye_wii.md](docs/goldeneye_wii.md)
 * [ ] Filelist VFS
 * [ ] Intermediate representation of EDB files
 * [ ] EDB to Euroland 4 decompiler
@@ -38,7 +39,7 @@ _(Priority currently lies with Spyro and G-Force)_
 | Ice Age: Dawn of the Dinosaurs (260)           | ✅/❌                     | ✅/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
 | G-Force (259)                                  | ✅/❌                     | ✅/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
 | Spider-Man 4 (263)                             | ✅/❌                     | ✅/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
-| GoldenEye 007 (263)                            | ✅/❌                     | ✅/❌  | ❌       | ✅/❌      | ❌          | ❌         | ✅/❌          |
+| GoldenEye 007 (263)                            | ✅/🚧                     | ✅/🚧  | ❌       | ✅/🚧      | ❌          | ❌         | ✅/❌          |
 
 <sup>[1]</sup> Texture/entity support only indicates the ability to read headers and frame data. See the platform matrix for texture/mesh encoding/decoding support
 
