@@ -17,3 +17,5 @@ xroot/
 *.ecm
 *.pyc
 *.log
+# the one model that is kept
+!player_size_reference.gltf
