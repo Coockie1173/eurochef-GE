@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 use super::{
-    geomap::{build_geometry_file, BuildStats, GeScene},
+    geomap::{build_geometry_file, BuildStats, GeScene, EDGE_HEIGHTS},
     gltf_import::{import_gltf, ImportOptions},
     level::{level_hash, make_level_of_geometry, multiplayer_spawn_trigger},
 };
@@ -118,6 +118,23 @@ pub fn new_map_from_scene(scene: &GeScene, options: &NewMapOptions) -> anyhow::R
         more.push(multiplayer_spawn_trigger([x, y, z], point.yaw, point.team));
     }
     stats.multiplayer_spawns = more.len();
+    // the game takes an edge that is 0.5 to 1.5 above the player: the floor in front of it
+    stats.edges = scene.edges.len();
+    for edge in &scene.edges {
+        let (dx, dz) = (edge.to[0] - edge.from[0], edge.to[2] - edge.from[2]);
+        let len = (dx * dx + dz * dz).sqrt().max(1e-6);
+        let middle = [0, 1, 2].map(|k| (edge.from[k] + edge.to[k]) * 0.5);
+        let (x, z) = (middle[0] - dz / len * 0.4, middle[2] + dx / len * 0.4);
+        if let Some(floor) = scene.floor_at(x, z, Some(middle[1])) {
+            let height = middle[1] - floor;
+            if !EDGE_HEIGHTS.contains(&height) {
+                stats.warnings.push(format!(
+                    "the edge at {:.2} {:.2} {:.2} is {height:.2} above the floor in front of it, the game takes one from {} to {}",
+                    middle[0], middle[1], middle[2], EDGE_HEIGHTS.start(), EDGE_HEIGHTS.end()
+                ));
+            }
+        }
+    }
     let data = make_level_of_geometry(&geometry, level_hash, spawn, &more).context("couldn't add the spawn point")?;
 
     Ok(NewMap {

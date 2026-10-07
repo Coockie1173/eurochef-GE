@@ -18,6 +18,11 @@
 //! starts with `sky` is the sky, with everything below it: drawn where it stands whichever room
 //! the camera is in, never collided with and not shaded by the importer's light.
 //!
+//! A mesh or node whose name starts with `vault`, `vault_long` or `climb` isn't drawn or collided
+//! with: it stands for the top of an obstacle (a quad or a box that ends where the obstacle's top
+//! does) and the rim of its faces that look up become the edges the player vaults over (about
+//! 1.25 or 1.6 past the edge) or climbs up onto, from outside.
+//!
 //! Rooms and portals (see `rooms`): a node named `RoomXX` holds a room, with everything below
 //! it (`Room01`, `Room_01`, `Room01_walls` and `Room01.001` are all room 01). A node named
 //! `Portal_XX_YY` isn't drawn: its mesh, a flat quad in the opening, is the portal between
@@ -30,7 +35,7 @@ use anyhow::Context;
 use image::RgbaImage;
 
 use super::{
-    geomap::{GeScene, ScenePortal, SceneSpawn, SceneTriangle},
+    geomap::{rim_edges, GeScene, ScenePortal, SceneSpawn, SceneTriangle, EDGE_CLIMB, EDGE_LONG_VAULT, EDGE_VAULT},
     mesh::{GeVertex, COLOUR_ONE},
     texture::GeTexture,
 };
@@ -106,6 +111,15 @@ fn team_of_name(name: &str) -> Option<u32> {
     let rest = name.strip_prefix("mp_spawn")?.trim_start_matches(['_', ' ', '-']).strip_prefix("team")?;
     let digits: String = rest.trim_start_matches(['_', ' ', '-']).chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
+}
+
+/// What the edges of a mesh or node named `vault...`, `vault_long...` or `climb...` are
+fn edge_of_name(name: Option<&str>) -> Option<u16> {
+    let name = name?.to_lowercase();
+    [("vault_long", EDGE_LONG_VAULT), ("long_vault", EDGE_LONG_VAULT), ("vault", EDGE_VAULT), ("climb", EDGE_CLIMB)]
+        .into_iter()
+        .find(|(prefix, _)| name.starts_with(prefix))
+        .map(|(_, flags)| flags)
 }
 
 fn is_sky_name(name: Option<&str>) -> bool {
@@ -233,6 +247,8 @@ struct Importer<'a> {
     room_ids: Vec<String>,
     /// The portals, with the rooms they name
     portals: Vec<(String, [String; 2], Vec<[[f32; 3]; 3]>)>,
+    /// The meshes that stand for an obstacle's top: their name, the edges' flags, their triangles
+    tops: Vec<(String, u16, Vec<[[f32; 3]; 3]>)>,
 }
 
 /// What a node is a part of, handed down to the nodes below it
@@ -246,6 +262,8 @@ struct Inherited {
     portal: Option<usize>,
     /// Its triangles are the sky's
     sky: bool,
+    /// The obstacle's top its triangles are
+    top: Option<usize>,
 }
 
 impl Importer<'_> {
@@ -309,6 +327,14 @@ impl Importer<'_> {
                         self.room_ids.len() - 1
                     }
                 });
+            }
+        }
+
+        if part.top.is_none() {
+            if let Some(flags) = edge_of_name(node.name()).or_else(|| edge_of_name(mesh_name.as_deref())) {
+                let name = node.name().or(mesh_name.as_deref()).unwrap_or("vault").to_string();
+                self.tops.push((name, flags, vec![]));
+                part.top = Some(self.tops.len() - 1);
             }
         }
 
@@ -376,6 +402,12 @@ impl Importer<'_> {
             .filter(|t| t.iter().all(|i| (*i as usize) < positions.len()))
             .map(|t| [t[0] as usize, t[2] as usize, t[1] as usize]);
 
+        if let Some(top) = part.top {
+            for t in triangles {
+                self.tops[top].2.push([positions[t[0]], positions[t[1]], positions[t[2]]]);
+            }
+            return Ok(());
+        }
         let is_sky = part.sky;
         if let (Some(portal), false) = (part.portal, is_sky) {
             for t in triangles {
@@ -487,6 +519,7 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         skipped_primitives: 0,
         room_ids: vec![],
         portals: vec![],
+        tops: vec![],
     };
 
     let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
@@ -506,6 +539,13 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
             importer.skipped_primitives,
             path.display()
         );
+    }
+    for (name, flags, triangles) in std::mem::take(&mut importer.tops) {
+        let edges = rim_edges(&triangles, flags);
+        if edges.is_empty() {
+            tracing::warn!("{name} has no face that looks up, nothing of it can be vaulted or climbed");
+        }
+        importer.scene.edges.extend(edges);
     }
     for (name, ids, triangles) in std::mem::take(&mut importer.portals) {
         let room = |id: &String| {

@@ -23,6 +23,7 @@
 //! aren't drawn then, each listed by every zone it reaches into: a body is tested against what
 //! its own zone lists, also when it stands in a doorway.
 
+use std::collections::HashMap;
 use super::{
     mesh::{
         halve, write_mesh_with_collision, write_split, FACE_NO_COLLISION, Bounds, GeVertex, MeshData, MeshPart,
@@ -103,6 +104,70 @@ pub struct SceneSpawn {
     pub team: Option<u32>,
 }
 
+/// An edge the player gets over or onto with the action button: the rim of an obstacle's top.
+/// It is taken from one side only, towards `(dz, 0, -dx)` of the way it runs
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneEdge {
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    /// EDGE_...
+    pub flags: u16,
+}
+
+/// The player vaults over it and comes down about 1.25 behind it
+pub const EDGE_VAULT: u16 = 0x01;
+/// The same, further: about 1.6 behind it
+pub const EDGE_LONG_VAULT: u16 = 0x02;
+/// The player climbs up and stands on the top behind it
+pub const EDGE_CLIMB: u16 = 0x10;
+/// How far in front of an edge and behind it the zones are looked up that get it
+const EDGE_ZONE_REACH: f32 = 0.5;
+/// How far above the player the game takes an edge
+pub const EDGE_HEIGHTS: std::ops::RangeInclusive<f32> = 0.5..=1.5;
+
+/// The edges of a mesh that stands for an obstacle's top: the rim of its faces that look up,
+/// each run so that it is taken from outside, towards the faces
+pub fn rim_edges(triangles: &[[[f32; 3]; 3]], flags: u16) -> Vec<SceneEdge> {
+    // a millimetre apart is the same corner
+    let key = |p: [f32; 3]| p.map(|v| (v * 1000.0).round() as i64);
+    let top: Vec<&[[f32; 3]; 3]> = triangles
+        .iter()
+        .filter(|t| {
+            let u = [0, 1, 2].map(|k| t[1][k] - t[0][k]);
+            let v = [0, 1, 2].map(|k| t[2][k] - t[0][k]);
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            len > 1e-9 && n[1] / len > 0.7
+        })
+        .collect();
+    let mut uses: HashMap<([i64; 3], [i64; 3]), usize> = HashMap::new();
+    let sides = |t: &[[f32; 3]; 3]| [(t[0], t[1], t[2]), (t[1], t[2], t[0]), (t[2], t[0], t[1])];
+    for t in &top {
+        for (a, b, _) in sides(t) {
+            let (a, b) = (key(a), key(b));
+            *uses.entry(if a <= b { (a, b) } else { (b, a) }).or_default() += 1;
+        }
+    }
+    let mut edges = vec![];
+    for t in &top {
+        for (a, b, c) in sides(t) {
+            let (ka, kb) = (key(a), key(b));
+            if uses[&if ka <= kb { (ka, kb) } else { (kb, ka) }] != 1 {
+                continue;
+            }
+            let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
+            if dx * dx + dz * dz < 0.05 * 0.05 {
+                continue;
+            }
+            // the faces are on the side the player goes to: (dz, 0, -dx)
+            let inside = dz * (c[0] - a[0]) - dx * (c[2] - a[2]) > 0.0;
+            let (from, to) = if inside { (a, b) } else { (b, a) };
+            edges.push(SceneEdge { from, to, flags });
+        }
+    }
+    edges
+}
+
 #[derive(Clone, Default)]
 pub struct GeScene {
     pub textures: Vec<GeTexture>,
@@ -119,6 +184,8 @@ pub struct GeScene {
     /// The sky's triangles, where they stand in the level. Empty: no sky
     pub sky: Vec<SceneTriangle>,
     pub multiplayer_spawns: Vec<SceneSpawn>,
+    /// What the player vaults over and climbs onto
+    pub edges: Vec<SceneEdge>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,6 +197,7 @@ pub struct BuildStats {
     pub textures: usize,
     pub sky_triangles: usize,
     pub multiplayer_spawns: usize,
+    pub edges: usize,
     pub bounds: Option<Bounds>,
     /// 1 for a level without rooms
     pub zones: usize,
@@ -694,6 +762,41 @@ fn write_placement_node(w: &mut Writer, node: &PlacementNode, entities: &[Placed
     }
 }
 
+/// The edges as an entity's variant 6: the variant word at the entity's +0x40 (a bit for each
+/// variant, the offset to a word for each), that word (the offset to the variant, its number),
+/// and the variant: the number of chains and a pointer to them, the same for polygons (a
+/// ladder's rungs, none here), the number of 16 byte records in each. A chain is a record with
+/// the number of edges and the first point, then a record for each edge: which of its ends
+/// nothing joins (1 the start, 2 the end), its flags, and the point it ends at
+fn write_edges(w: &mut Writer, entity: usize, edges: &[SceneEdge]) {
+    const VARIANT_EDGES: u32 = 6;
+    let variants = entity + 0x40;
+    let word = w.pos();
+    w.set_u32(variants, ((word - variants) as u32) << 8 | 1 << VARIANT_EDGES);
+    w.u32(4 << 8 | VARIANT_EDGES);
+    w.u32(edges.len() as u32);
+    let p_chains = w.rel();
+    w.u32(0);
+    let p_polygons = w.rel();
+    w.u16(edges.len() as u16 * 2);
+    w.u16(0);
+    w.zeros(12);
+    w.point_here(p_chains);
+    w.point_here(p_polygons);
+    for edge in edges {
+        // the game's own chains have the first edge's values in the first record as well
+        w.u8(1);
+        w.u8(3);
+        w.u16(edge.flags);
+        w.f32s(&edge.from);
+        w.u8(0);
+        w.u8(3);
+        w.u16(edge.flags);
+        w.f32s(&edge.to);
+    }
+    w.align(4);
+}
+
 /// An array of nothing: no count, and a pointer that is set to the zeros at the map's end
 fn empty_array(w: &mut Writer, p_end: &mut Vec<usize>) {
     w.u32(0);
@@ -1086,18 +1189,44 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
         write_split(&mut w, &sky);
     }
 
+    // an edge is its zone's: the one in front of it, where the player stands, and the one behind
+    // it when that is another
+    let mut edges_by_zone: Vec<Vec<SceneEdge>> = vec![vec![]; zone_count];
+    for edge in &scene.edges {
+        let Some(zoning) = zoning else {
+            edges_by_zone[0].push(edge.clone());
+            continue;
+        };
+        let (dx, dz) = (edge.to[0] - edge.from[0], edge.to[2] - edge.from[2]);
+        let len = (dx * dx + dz * dz).sqrt().max(1e-6);
+        let middle = [0, 1, 2].map(|k| (edge.from[k] + edge.to[k]) * 0.5);
+        let beside = |way: f32| [middle[0] + dz / len * way, middle[1], middle[2] - dx / len * way];
+        let front = zoning.zone_at(beside(-EDGE_ZONE_REACH)) as usize;
+        let behind = zoning.zone_at(beside(EDGE_ZONE_REACH)) as usize;
+        edges_by_zone[front.min(zone_count - 1)].push(edge.clone());
+        if behind != front {
+            edges_by_zone[behind.min(zone_count - 1)].push(edge.clone());
+        }
+    }
+
     // each zone's own entity (0x608), which refers to an empty group (0x603) through the
     // reference pointer before its own: the level's triangles are all placed
     for zone in 0..zone_count {
         w.align(32);
         w.set_u32(a_refptrs[zone * 2 + 1], w.pos() as u32);
+        let entity = w.pos();
         w.u32(0x608);
         w.zeros(0x50);
         w.u32(0x01000000);
         w.u32(zone as u32 * 2);
         w.zeros(0xC);
         w.f32(10000.0);
-        w.zeros(0x14);
+        // the game asks the entity of the zone the player is in for its edges
+        if edges_by_zone[zone].is_empty() {
+            w.zeros(0x14);
+        } else {
+            write_edges(&mut w, entity, &edges_by_zone[zone]);
+        }
         w.set_u32(a_refptrs[zone * 2], w.pos() as u32);
         w.u32(0x603);
         w.zeros(0x50);
@@ -1126,4 +1255,25 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
     w.set_u32(section_start, size);
 
     (w.buf, stats)
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    /// A quad's rim: four edges, each with the quad on the side the player goes to
+    #[test]
+    fn rim_runs_around_the_top() {
+        let (a, b, c, d) = ([0.0, 1.0, 0.0], [2.0, 1.0, 0.0], [2.0, 1.0, 1.0], [0.0, 1.0, 1.0]);
+        // both ways round, the faces look up in one and down in the other
+        let up = rim_edges(&[[a, c, b], [a, d, c]], EDGE_VAULT);
+        assert_eq!(up.len(), 4);
+        for edge in &up {
+            let (dx, dz) = (edge.to[0] - edge.from[0], edge.to[2] - edge.from[2]);
+            let middle = [(edge.from[0] + edge.to[0]) * 0.5, (edge.from[2] + edge.to[2]) * 0.5];
+            let inwards = dz * (1.0 - middle[0]) - dx * (0.5 - middle[1]);
+            assert!(inwards > 0.0, "{edge:?} is taken away from the quad");
+        }
+        assert!(rim_edges(&[[a, b, c], [a, c, d]], EDGE_VAULT).is_empty());
+    }
 }
