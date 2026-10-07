@@ -22,7 +22,10 @@ pub const ENTITY_MESH: u32 = 0x601;
 /// area that join strips, with bit 0x8000)
 pub const FACE_NO_COLLISION: u16 = 0x8200;
 pub const FLAG_COLLIDES: u32 = 0x100;
-const STRIP_FLAGS: u16 = 0x40;
+/// A strip's flags: seen from its front only, as nearly all of the game's own levels' are, or
+/// from both sides (the game's test level)
+const STRIP_ONE_SIDED: u16 = 0x80;
+const STRIP_TWO_SIDED: u16 = 0x40;
 const VERTEX_FORMAT: u32 = 0x203;
 const NORMAL_SCALE: f32 = 63.0;
 const NORMAL_PAD: u8 = 0x77;
@@ -50,6 +53,8 @@ pub struct MeshPart {
     pub triangles: Vec<[GeVertex; 3]>,
     /// Flags for each triangle (FACE_...), none: all 0
     pub flags: Vec<u16>,
+    /// Drawn from behind as well
+    pub two_sided: bool,
 }
 
 #[derive(Clone, Default)]
@@ -311,7 +316,7 @@ pub fn write_mesh_in(w: &mut Writer, mesh: &MeshData, flags: u32, group: Option<
     for (part, list) in mesh.parts.iter().zip(&lists) {
         w.u16(part.triangles.len() as u16);
         w.u16(part.texture);
-        w.u16(STRIP_FLAGS);
+        w.u16(if part.two_sided { STRIP_TWO_SIDED } else { STRIP_ONE_SIDED });
         w.u16(0); // transparency
         w.u32(list.len() as u32);
         w.u32(0);

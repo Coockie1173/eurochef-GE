@@ -14,12 +14,21 @@
 //! in the zone's placement tree: a node with children has a count, flags and for each child a
 //! pointer and a box (0x1C bytes), a leaf (count 0) lists placement indices with their flags.
 //! Flag 8 is on everything a body is tested against.
+//!
+//! A scene with rooms (see `rooms`) gets a zone for each: the room's drawn triangles are one
+//! placed group in its zone, the portals follow the map (0x44 bytes each: the two zones, flags,
+//! the four corners at +0x14) and each zone has its links at +0x20 (8 bytes: this zone, the
+//! other, the portal's index, how many more links to the same zone follow, and 1 when the
+//! portal's front is the other zone's side). What a body collides with is always parts that
+//! aren't drawn then, each listed by every zone it reaches into: a body is tested against what
+//! its own zone lists, also when it stands in a doorway.
 
 use super::{
     mesh::{
         halve, write_mesh_with_collision, write_split, FACE_NO_COLLISION, Bounds, GeVertex, MeshData, MeshPart,
         COLOUR_ONE, MAX_STRIP_TRIANGLES,
     },
+    rooms::{make_zoning, positions, Zoning},
     texture::{write_texture, GeTexture},
     writer::Writer,
 };
@@ -37,17 +46,31 @@ const HC_LOCAL_TEXTURE: u32 = 0x86000000;
 const HC_LOCAL_MATERIAL: u32 = 0xA5000000;
 const TEXTURE_FLAGS: u32 = 0x04000000;
 const PLACEMENT_COLLIDES: u16 = 9;
+/// A placement's flags in a zone's tree when no body is tested against it
+const PLACEMENT_LISTED: u8 = 1;
 
 /// Triangles a drawn mesh and a collision mesh hold at most. The game goes over all triangles of
 /// a mesh whose bounds a body touches, so collision meshes are kept small
 const MAX_DRAWN_TRIANGLES: usize = 600;
 const MAX_COLLISION_TRIANGLES: usize = 256;
+/// How far in front of a triangle a body's middle and its ends are when it touches it
+const BODY_REACHES: [f32; 5] = [0.05, 0.3, 0.6, 1.0, 1.7];
+const BODY_STEP: f32 = 0.4;
+/// A zone's list that is no longer than this stays one leaf
+const PLACEMENT_LEAF: usize = 16;
+const PLACEMENT_TREE_LEVELS: usize = 3;
+/// A node's box is this much larger than what is in it (a floor's own box has no height)
+const PLACEMENT_BOX_MARGIN: f32 = 0.5;
+/// How far outside a zone's box a collision part is still listed by the zone
+const ZONE_REACH: f32 = 1.0;
 
 /// The zone's settings (fog, ambience, colours) as the game's test level has them
 const ZONE_IDENTIFIER: [u32; 20] = [
     0, 0, 0x3F000000, 0x3F800000, 0, 0x3F800000, 0, 0, 0x00010000, 0, 0, 0x80808000, 0xFFFFFF00,
     0x8080FF00, 0xFFFFFFFF, 0, 0xFFFFFFFF, 0, 0, 0,
 ];
+/// Which of the map's skies a zone is drawn with is the word at +0x38 of its settings, -1: none
+const ZONE_SKY_INDEX: usize = 14;
 
 #[derive(Clone)]
 pub struct SceneTriangle {
@@ -56,6 +79,28 @@ pub struct SceneTriangle {
     pub vertices: [GeVertex; 3],
     /// Left out of the collision that is made from the drawn triangles
     pub no_collision: bool,
+    /// Index into the scene's rooms, None for a triangle of no room's node
+    pub room: Option<usize>,
+    /// Drawn from behind as well
+    pub two_sided: bool,
+}
+
+/// A portal as the scene has it: the triangles of its mesh (a flat quad) and its two rooms
+#[derive(Clone)]
+pub struct ScenePortal {
+    pub name: String,
+    pub rooms: [usize; 2],
+    pub triangles: Vec<[[f32; 3]; 3]>,
+}
+
+/// A spawn point of a multiplayer game as the scene has it
+#[derive(Clone, Debug)]
+pub struct SceneSpawn {
+    pub position: [f32; 3],
+    /// Which way the player looks, around the y axis: 0 is along +z, a quarter turn along +x
+    pub yaw: f32,
+    /// The team it belongs to in a team game, None: anyone's
+    pub team: Option<u32>,
 }
 
 #[derive(Clone, Default)]
@@ -64,8 +109,16 @@ pub struct GeScene {
     pub triangles: Vec<SceneTriangle>,
     /// Triangles a body collides with. Empty: the drawn triangles are collided with
     pub collision: Vec<[[f32; 3]; 3]>,
+    /// Triangles a body collides with as well, whichever the others are: a ramp over stairs
+    pub added_collision: Vec<[[f32; 3]; 3]>,
     /// Where the scene says the player starts
     pub spawn: Option<[f32; 3]>,
+    /// The rooms' names. Empty: the level is one zone, drawn as a whole
+    pub rooms: Vec<String>,
+    pub portals: Vec<ScenePortal>,
+    /// The sky's triangles, where they stand in the level. Empty: no sky
+    pub sky: Vec<SceneTriangle>,
+    pub multiplayer_spawns: Vec<SceneSpawn>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,7 +128,14 @@ pub struct BuildStats {
     pub collision_meshes: usize,
     pub collision_triangles: usize,
     pub textures: usize,
+    pub sky_triangles: usize,
+    pub multiplayer_spawns: usize,
     pub bounds: Option<Bounds>,
+    /// 1 for a level without rooms
+    pub zones: usize,
+    pub portals: usize,
+    /// What there is to say about the rooms: portals left out, rooms nothing leads to
+    pub warnings: Vec<String>,
 }
 
 impl GeScene {
@@ -132,14 +192,15 @@ impl GeScene {
             self.triangles
                 .iter()
                 .flat_map(|t| t.vertices.iter().map(|v| v.pos))
-                .chain(self.collision.iter().flatten().copied()),
+                .chain(self.collision.iter().flatten().copied())
+                .chain(self.added_collision.iter().flatten().copied()),
         )
     }
 
-    /// The triangles a body collides with: the given ones, or the drawn ones. Without the ones
-    /// that have no area, with the face's own normal
+    /// The triangles a body collides with: the given ones, or the drawn ones, and the added
+    /// ones. Without the ones that have no area, with the face's own normal
     pub fn collision_triangles(&self) -> Vec<[GeVertex; 3]> {
-        let source: Vec<[[f32; 3]; 3]> = if self.collision.is_empty() {
+        let mut source: Vec<[[f32; 3]; 3]> = if self.collision.is_empty() {
             self.triangles
                 .iter()
                 .filter(|t| !t.no_collision)
@@ -148,6 +209,7 @@ impl GeScene {
         } else {
             self.collision.clone()
         };
+        source.extend(self.added_collision.iter().copied());
 
         source
             .into_iter()
@@ -195,6 +257,18 @@ enum Entity {
     Hull(MeshData),
 }
 
+/// The sky's entity: a group like the drawn one, of triangles nothing collides with. It isn't
+/// placed, the map lists it as its one sky and every zone's settings name it
+fn sky_meshes(scene: &GeScene) -> Vec<MeshData> {
+    let triangles: Vec<Drawn> = scene
+        .sky
+        .iter()
+        .filter(|t| has_area(&t.vertices))
+        .map(|t| (t.texture.map(|i| i as u16 + 1).unwrap_or(0), t.vertices, FACE_NO_COLLISION, t.two_sided))
+        .collect();
+    drawn_meshes(triangles)
+}
+
 /// The mesh a hull is drawn as: two triangles without area, in the corners of its box. Nothing
 /// is seen of them, and the entity has the bounds of what it is collided with
 fn unseen_mesh(hull: &MeshData) -> MeshData {
@@ -212,6 +286,7 @@ fn unseen_mesh(hull: &MeshData) -> MeshData {
             texture: 0,
             triangles: vec![corner(bounds.min), corner(bounds.max)],
             flags: vec![FACE_NO_COLLISION; 2],
+            two_sided: false,
         }],
     }
 }
@@ -241,44 +316,37 @@ fn has_area(t: &[GeVertex; 3]) -> bool {
     len.is_finite() && len >= 1e-7
 }
 
-fn make_entities(scene: &GeScene, stats: &mut BuildStats) -> Vec<Entity> {
-    let mut entities = vec![];
-    // with a collision of its own the scene's drawn triangles aren't collided with at all
-    let own_collision = !scene.collision.is_empty();
+/// An entity with the zone it is placed in
+struct Placed {
+    entity: Entity,
+    zone: u16,
+    bounds: Bounds,
+}
 
-    // texture 0 of the file is the default one, the scene's follow. the flags: what a body
-    // collides with of the drawn triangles is told triangle by triangle
-    let drawn: Vec<(u16, [GeVertex; 3], u16)> = scene
-        .triangles
-        .iter()
-        .map(|t| {
-            let collides = !own_collision && !t.no_collision && has_area(&t.vertices);
-            (
-                t.texture.map(|i| i as u16 + 1).unwrap_or(0),
-                t.vertices,
-                if collides { 0 } else { FACE_NO_COLLISION },
-            )
-        })
-        .collect();
-    stats.drawn_triangles = drawn.len();
-    if !own_collision {
-        stats.collision_triangles = drawn.iter().filter(|t| t.2 == 0).count();
-    }
+/// A drawn triangle: its texture in the file, its corners and its flags
+type Drawn = (u16, [GeVertex; 3], u16, bool);
+
+/// The meshes of a group: the triangles cut into parts that are small boxes, each part's
+/// triangles sorted by texture
+fn drawn_meshes(triangles: Vec<Drawn>) -> Vec<MeshData> {
     let mut groups = vec![];
-    cut(drawn, MAX_DRAWN_TRIANGLES, &|t| centre_of(&t.1), &mut groups);
-    let meshes: Vec<MeshData> = groups
+    cut(triangles, MAX_DRAWN_TRIANGLES, &|t| centre_of(&t.1), &mut groups);
+    groups
         .into_iter()
         .map(|group| {
             let mut parts: Vec<MeshPart> = vec![];
-            for (texture, triangle, flags) in group {
+            for (texture, triangle, flags, two_sided) in group {
                 let part = match parts
                     .iter()
-                    .position(|p| p.texture == texture && p.triangles.len() < MAX_STRIP_TRIANGLES)
+                    .position(|p| {
+                        p.texture == texture && p.two_sided == two_sided && p.triangles.len() < MAX_STRIP_TRIANGLES
+                    })
                 {
                     Some(i) => &mut parts[i],
                     None => {
                         parts.push(MeshPart {
                             texture,
+                            two_sided,
                             ..Default::default()
                         });
                         parts.last_mut().unwrap()
@@ -290,36 +358,346 @@ fn make_entities(scene: &GeScene, stats: &mut BuildStats) -> Vec<Entity> {
             parts.sort_by_key(|p| p.texture);
             MeshData { parts }
         })
+        .collect()
+}
+
+/// The parts of a collision that isn't drawn
+fn hulls(collision: Vec<[GeVertex; 3]>) -> Vec<MeshData> {
+    let mut groups = vec![];
+    cut(collision, MAX_COLLISION_TRIANGLES, &centre_of, &mut groups);
+    groups
+        .into_iter()
+        .map(|group| MeshData {
+            parts: vec![MeshPart {
+                texture: 0,
+                triangles: group,
+                flags: vec![],
+                two_sided: false,
+            }],
+        })
+        .collect()
+}
+
+fn make_entities(scene: &GeScene, zoning: Option<&Zoning>, stats: &mut BuildStats) -> Vec<Placed> {
+    let mut entities = vec![];
+    // with a collision of its own the scene's drawn triangles aren't collided with at all, and
+    // with rooms the collision is always parts of its own
+    // (added collision makes it one too: the drawn triangles and the added ones together)
+    let own_collision = !scene.collision.is_empty() || !scene.added_collision.is_empty();
+    let drawn_collides = !own_collision && zoning.is_none();
+
+    // texture 0 of the file is the default one, the scene's follow. the flags: what a body
+    // collides with of the drawn triangles is told triangle by triangle
+    let drawn: Vec<Drawn> = scene
+        .triangles
+        .iter()
+        .map(|t| {
+            let collides = drawn_collides && !t.no_collision && has_area(&t.vertices);
+            (
+                t.texture.map(|i| i as u16 + 1).unwrap_or(0),
+                t.vertices,
+                if collides { 0 } else { FACE_NO_COLLISION },
+                t.two_sided,
+            )
+        })
         .collect();
-    stats.drawn_meshes = meshes.len();
-    if !own_collision {
-        stats.collision_meshes = meshes
-            .iter()
-            .filter(|m| m.parts.iter().any(|p| p.flags.iter().any(|f| *f == 0)))
-            .count();
+    stats.drawn_triangles = drawn.len();
+    let whole = Bounds::of(drawn.iter().flat_map(|t| positions(&t.1)));
+
+    let Some(zoning) = zoning else {
+        if drawn_collides {
+            stats.collision_triangles = drawn.iter().filter(|t| t.2 == 0).count();
+        }
+        let meshes = drawn_meshes(drawn);
+        stats.drawn_meshes = meshes.len();
+        if drawn_collides {
+            stats.collision_meshes = meshes
+                .iter()
+                .filter(|m| m.parts.iter().any(|p| p.flags.iter().any(|f| *f == 0)))
+                .count();
+        }
+        if !meshes.is_empty() {
+            entities.push(Placed {
+                entity: Entity::Drawn(meshes),
+                zone: 0,
+                bounds: whole,
+            });
+        }
+
+        if own_collision {
+            let collision = scene.collision_triangles();
+            stats.collision_triangles = collision.len();
+            for hull in hulls(collision) {
+                stats.collision_meshes += 1;
+                entities.push(Placed {
+                    bounds: Bounds::of(hull.positions()),
+                    entity: Entity::Hull(hull),
+                    zone: 0,
+                });
+            }
+        }
+        return entities;
+    };
+
+    // a group for each room
+    let mut by_zone: Vec<Vec<Drawn>> = vec![vec![]; zoning.zones.len()];
+    for (triangle, zone) in drawn.into_iter().zip(&zoning.triangle_zones) {
+        by_zone[*zone as usize].push(triangle);
     }
-    if !meshes.is_empty() {
-        entities.push(Entity::Drawn(meshes));
+    for (zone, triangles) in by_zone.into_iter().enumerate() {
+        let bounds = Bounds::of(triangles.iter().flat_map(|t| positions(&t.1)));
+        let meshes = drawn_meshes(triangles);
+        stats.drawn_meshes += meshes.len();
+        if !meshes.is_empty() {
+            entities.push(Placed {
+                entity: Entity::Drawn(meshes),
+                zone: zone as u16,
+                bounds,
+            });
+        }
     }
 
-    if own_collision {
-        let collision = scene.collision_triangles();
-        stats.collision_triangles = collision.len();
-        let mut groups = vec![];
-        cut(collision, MAX_COLLISION_TRIANGLES, &centre_of, &mut groups);
-        stats.collision_meshes = groups.len();
-        for group in groups {
-            entities.push(Entity::Hull(MeshData {
-                parts: vec![MeshPart {
-                    texture: 0,
-                    triangles: group,
-                    flags: vec![],
-                }],
-            }));
+    // the collision's parts, each in the zone the game finds in front of its triangles
+    let collision = scene.collision_triangles();
+    stats.collision_triangles = collision.len();
+    let mut by_zone: Vec<Vec<[GeVertex; 3]>> = vec![vec![]; zoning.zones.len()];
+    for triangle in collision {
+        let centre = centre_of(&triangle);
+        let normal = triangle[0].normal;
+        let front = [0, 1, 2].map(|k| centre[k] + normal[k] * 0.05);
+        by_zone[zoning.zone_at(front) as usize].push(triangle);
+    }
+    for (zone, triangles) in by_zone.into_iter().enumerate() {
+        for hull in hulls(triangles) {
+            stats.collision_meshes += 1;
+            entities.push(Placed {
+                bounds: Bounds::of(hull.positions()),
+                entity: Entity::Hull(hull),
+                zone: zone as u16,
+            });
         }
     }
 
     entities
+}
+
+/// Which placements a zone lists: its own, and the collision parts of other zones that reach
+/// into its box (the wall and the floor of the next room, for a body in the doorway)
+fn zone_lists(entities: &[Placed], zoning: Option<&Zoning>) -> Vec<Vec<usize>> {
+    let Some(zoning) = zoning else {
+        return vec![(0..entities.len()).collect()];
+    };
+    let mut boxes: Vec<Bounds> = zoning.zones.iter().map(|z| z.bounds).collect();
+    for placed in entities {
+        boxes[placed.zone as usize].merge(&placed.bounds);
+    }
+    let mut lists: Vec<Vec<usize>> = boxes
+        .iter()
+        .enumerate()
+        .map(|(zone, zone_box)| {
+            (0..entities.len())
+                .filter(|i| {
+                    let placed = &entities[*i];
+                    if placed.zone as usize == zone {
+                        return true;
+                    }
+                    matches!(placed.entity, Entity::Hull(_))
+                        && !zone_box.is_empty()
+                        && !placed.bounds.is_empty()
+                        && (0..3).all(|k| {
+                            placed.bounds.min[k] <= zone_box.max[k] + ZONE_REACH
+                                && placed.bounds.max[k] >= zone_box.min[k] - ZONE_REACH
+                        })
+                })
+                .collect()
+        })
+        .collect();
+
+    // a body is tested against what the zone it is in lists, and that zone is the one the tree
+    // gives its place: every part is listed as well by each zone the tree gives the places a
+    // body is at when it stands on it or against it, whatever the boxes say
+    let mut added = 0;
+    for (i, placed) in entities.iter().enumerate() {
+        let Entity::Hull(hull) = &placed.entity else {
+            continue;
+        };
+        for t in hull.parts.iter().flat_map(|p| p.triangles.iter()) {
+            let centre = centre_of(t);
+            let normal = t[0].normal;
+            // places all over it, no further apart than a body is wide
+            let side = |a: usize, b: usize| {
+                (0..3).map(|k| (t[a].pos[k] - t[b].pos[k]).powi(2)).sum::<f32>().sqrt()
+            };
+            let longest = side(0, 1).max(side(1, 2)).max(side(2, 0));
+            let steps = ((longest / BODY_STEP).ceil() as usize).clamp(1, 64);
+            let places = (0..=steps).flat_map(|a| {
+                (0..=steps - a).map(move |b| {
+                    // kept a little inside the triangle
+                    let (u, v) = (a as f32 / steps as f32, b as f32 / steps as f32);
+                    let on = [0, 1, 2].map(|k| {
+                        t[0].pos[k] + (t[1].pos[k] - t[0].pos[k]) * u + (t[2].pos[k] - t[0].pos[k]) * v
+                    });
+                    [0, 1, 2].map(|k| on[k] + (centre[k] - on[k]) * 0.02)
+                })
+            });
+            for place in places {
+                for ahead in BODY_REACHES {
+                    let zone = zoning.zone_at([0, 1, 2].map(|k| place[k] + normal[k] * ahead)) as usize;
+                    if zone < lists.len() && !lists[zone].contains(&i) {
+                        lists[zone].push(i);
+                        added += 1;
+                    }
+                }
+            }
+        }
+    }
+    if added > 0 {
+        tracing::info!("{added} collision part(s) listed by a zone they aren't in: its tree puts a body there");
+    }
+    lists
+}
+
+/// A zone's placement tree: what a body's surroundings are looked up in
+enum PlacementNode {
+    Leaf(Vec<usize>),
+    Node(Vec<PlacementNode>),
+}
+
+/// The four parts (or fewer) a list of placements is cut into, each a box of its own
+fn quarters(list: Vec<usize>, entities: &[Placed]) -> Vec<Vec<usize>> {
+    let centre = |i: &usize| entities[*i].bounds.or_zero().center();
+    let (lower, upper) = halve(list, &centre);
+    let mut parts = vec![];
+    for half in [lower, upper] {
+        if half.len() > 1 {
+            let (a, b) = halve(half, &centre);
+            parts.push(a);
+            parts.push(b);
+        } else {
+            parts.push(half);
+        }
+    }
+    parts.retain(|p| !p.is_empty());
+    parts
+}
+
+/// The tree of a zone's list. A long list is cut into small boxes the way the game's own levels
+/// are, so a body is handed what is near it and not the whole zone: three levels of nodes with
+/// up to four children each, then the leaves
+fn placement_tree(list: Vec<usize>, entities: &[Placed]) -> PlacementNode {
+    fn level(list: Vec<usize>, entities: &[Placed], levels: usize) -> PlacementNode {
+        if levels == 0 {
+            return PlacementNode::Leaf(list);
+        }
+        PlacementNode::Node(
+            quarters(list, entities)
+                .into_iter()
+                .map(|part| level(part, entities, levels - 1))
+                .collect(),
+        )
+    }
+    if list.len() <= PLACEMENT_LEAF {
+        return PlacementNode::Node(vec![PlacementNode::Leaf(list)]);
+    }
+    level(list, entities, PLACEMENT_TREE_LEVELS)
+}
+
+/// The flags of a placement in a zone's tree: bit 8 is on what a body is tested against. A
+/// drawn group none of whose triangles are collided with (the collision is hulls) mustn't have
+/// it: a body that is handed the group is tested against nothing that comes after it
+fn placement_flags(placed: &Placed) -> u8 {
+    let collides = match &placed.entity {
+        Entity::Drawn(meshes) => meshes
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .any(|p| p.flags.len() < p.triangles.len() || p.flags.iter().any(|f| *f != FACE_NO_COLLISION)),
+        Entity::Hull(_) => true,
+    };
+    if collides {
+        PLACEMENT_COLLIDES as u8
+    } else {
+        PLACEMENT_LISTED
+    }
+}
+
+/// A node's flags: all that its entries have
+fn node_flags(node: &PlacementNode, entities: &[Placed]) -> u8 {
+    match node {
+        PlacementNode::Leaf(list) => list.iter().fold(PLACEMENT_LISTED, |f, i| f | placement_flags(&entities[*i])),
+        PlacementNode::Node(children) => children.iter().fold(PLACEMENT_LISTED, |f, c| f | node_flags(c, entities)),
+    }
+}
+
+fn placement_box(node: &PlacementNode, entities: &[Placed]) -> Bounds {
+    let mut bounds = Bounds::EMPTY;
+    match node {
+        PlacementNode::Leaf(list) => {
+            for i in list {
+                bounds.merge(&entities[*i].bounds);
+            }
+        }
+        PlacementNode::Node(children) => {
+            for child in children {
+                bounds.merge(&placement_box(child, entities));
+            }
+        }
+    }
+    bounds
+}
+
+/// A node: its number of children, flags, then a pointer and a box (0x1C bytes) for each. A
+/// leaf: 0, flags, the number of entries, then a placement's index and its flags for each.
+/// `whole` is the box of a tree that is one leaf, as it was before lists were cut up
+fn write_placement_node(w: &mut Writer, node: &PlacementNode, entities: &[Placed], whole: &Bounds) {
+    let flags = node_flags(node, entities);
+    match node {
+        PlacementNode::Leaf(list) => {
+            w.u8(0);
+            w.u8(flags);
+            w.u16(list.len() as u16);
+            for i in list {
+                w.u16(*i as u16);
+                w.u8(placement_flags(&entities[*i]));
+                w.u8(0);
+            }
+            w.u32(0);
+            w.align(4);
+        }
+        PlacementNode::Node(children) => {
+            w.u8(children.len() as u8);
+            w.u8(flags);
+            w.u16(0);
+            let one_leaf = children.len() == 1 && matches!(children[0], PlacementNode::Leaf(_));
+            let pointers: Vec<usize> = children
+                .iter()
+                .map(|child| {
+                    let pointer = w.rel();
+                    let bounds = if one_leaf {
+                        *whole
+                    } else {
+                        let b = placement_box(child, entities).or_zero();
+                        Bounds {
+                            min: b.min.map(|v| v - PLACEMENT_BOX_MARGIN),
+                            max: b.max.map(|v| v + PLACEMENT_BOX_MARGIN),
+                        }
+                    };
+                    w.f32s(&bounds.min);
+                    w.f32s(&bounds.max);
+                    pointer
+                })
+                .collect();
+            for (child, pointer) in children.iter().zip(pointers) {
+                w.point_here(pointer);
+                write_placement_node(w, child, entities, whole);
+            }
+        }
+    }
+}
+
+/// An array of nothing: no count, and a pointer that is set to the zeros at the map's end
+fn empty_array(w: &mut Writer, p_end: &mut Vec<usize>) {
+    w.u32(0);
+    p_end.push(w.rel());
 }
 
 /// A count, the number of hashes that aren't local, and room for the pointer to the list
@@ -331,7 +709,32 @@ fn list_head(w: &mut Writer, count: usize, hashes: i16) -> usize {
 
 pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u8>, BuildStats) {
     let mut stats = BuildStats::default();
-    let entities = make_entities(scene, &mut stats);
+    let zoning = make_zoning(scene);
+    let zoning = zoning.as_ref();
+    let entities = make_entities(scene, zoning, &mut stats);
+    let lists = zone_lists(&entities, zoning);
+    let zone_count = lists.len();
+    stats.zones = zone_count;
+    // the sky is the entity behind the placed ones
+    let sky = sky_meshes(scene);
+    stats.sky_triangles = sky.iter().flat_map(|m| m.parts.iter()).map(|p| p.triangles.len()).sum();
+    let entity_count = entities.len() + !sky.is_empty() as usize;
+    if let Some(zoning) = zoning {
+        stats.portals = zoning.portals.len();
+        stats.warnings = zoning.warnings.clone();
+    }
+    // each zone's links to its portals, by the zone behind: the other zone, the portal, and
+    // whether the portal's front is the other zone's side
+    let mut links: Vec<Vec<(u16, usize, bool)>> = vec![vec![]; zone_count];
+    if let Some(zoning) = zoning {
+        for (i, portal) in zoning.portals.iter().enumerate() {
+            links[portal.zones[0] as usize].push((portal.zones[1], i, false));
+            links[portal.zones[1] as usize].push((portal.zones[0], i, true));
+        }
+        for zone in &mut links {
+            zone.sort_by_key(|l| (l.0, l.1));
+        }
+    }
     let mut textures = vec![GeTexture::solid("default", [0x80, 0x80, 0x80, 0xFF])];
     textures.extend(scene.textures.iter().cloned());
     stats.textures = scene.textures.len();
@@ -348,8 +751,8 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
     w.zeros(0x40 - 0x14); // the sizes, filled in at the end
 
     let p_sections = list_head(&mut w, 1, 1);
-    let p_refptrs = list_head(&mut w, 2, 2);
-    let p_entities = list_head(&mut w, entities.len(), 0);
+    let p_refptrs = list_head(&mut w, 2 * zone_count, 2 * zone_count as i16);
+    let p_entities = list_head(&mut w, entity_count, 0);
     let mut p_empty = vec![];
     for _ in 0..3 {
         p_empty.push(list_head(&mut w, 0, 0)); // anims, skins, scripts
@@ -386,7 +789,7 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
     }
     w.point_here(p_entities);
     let mut a_entities = vec![];
-    for i in 0..entities.len() {
+    for i in 0..entity_count {
         w.u32(HC_LOCAL_ENTITY + i as u32);
         w.u32(next_debug());
         a_entities.push(w.pos());
@@ -440,7 +843,7 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
 
     w.point_here(p_refptrs);
     let mut a_refptrs = vec![];
-    for _ in 0..2 {
+    for _ in 0..2 * zone_count {
         w.u32(0);
         w.u32(0);
         a_refptrs.push(w.pos());
@@ -472,55 +875,115 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
     w.u32(0x500);
     let p_bsp = w.rel();
     let mut p_end = vec![];
-    let mut empty_array = |w: &mut Writer| {
-        w.u32(0);
-        p_end.push(w.rel());
+    empty_array(&mut w, &mut p_end); // paths
+    empty_array(&mut w, &mut p_end); // lights
+    empty_array(&mut w, &mut p_end); // cameras
+    empty_array(&mut w, &mut p_end); // sounds by index
+    empty_array(&mut w, &mut p_end);
+    empty_array(&mut w, &mut p_end); // sounds
+    let portal_count = zoning.map(|z| z.portals.len()).unwrap_or(0);
+    let p_portals = if portal_count == 0 {
+        empty_array(&mut w, &mut p_end);
+        None
+    } else {
+        w.u32(portal_count as u32);
+        Some(w.rel())
     };
-    empty_array(&mut w); // paths
-    empty_array(&mut w); // lights
-    empty_array(&mut w); // cameras
-    empty_array(&mut w); // sounds by index
-    empty_array(&mut w);
-    empty_array(&mut w); // sounds
-    empty_array(&mut w); // portals
-    empty_array(&mut w); // skies
+    let p_skies = if sky.is_empty() {
+        empty_array(&mut w, &mut p_end);
+        None
+    } else {
+        w.u32(1);
+        Some(w.rel())
+    };
     w.u32(entities.len() as u32);
     let p_placements = w.rel();
-    empty_array(&mut w); // placement groups
+    empty_array(&mut w, &mut p_end); // placement groups
     let p_triggers = w.rel();
     w.u32(1);
     w.zeros(12);
     w.f32s(&bounds.min);
     w.f32s(&bounds.max);
-    w.u32(1); // zones
+    w.u32(zone_count as u32);
     debug_assert_eq!(w.pos() - map, 0x88);
 
-    // the zone, 0x8C bytes
-    let zone = w.pos();
-    w.u32(1); // its entity: the second reference pointer
-    let p_identifier = w.rel();
-    empty_array(&mut w); // lights
-    empty_array(&mut w); // sounds
-    empty_array(&mut w);
-    empty_array(&mut w);
-    let p_placement_info = w.rel();
-    let p_zone_2c = w.rel();
-    w.u32(0xFFFFFFFF);
-    w.u32(0); // section
-    w.u32(1);
-    w.zeros(0x88 - 0x3C);
-    p_end.push(w.rel());
-    debug_assert_eq!(w.pos() - zone, 0x8C);
+    // the zones, 0x8C bytes each
+    struct ZonePointers {
+        identifier: usize,
+        links: Option<usize>,
+        placement_info: usize,
+        at_2c: usize,
+    }
+    let mut zone_pointers = vec![];
+    for zone in 0..zone_count {
+        let start = w.pos();
+        w.u32(zone as u32 * 2 + 1); // its entity: a reference pointer
+        let identifier = w.rel();
+        empty_array(&mut w, &mut p_end); // lights
+        empty_array(&mut w, &mut p_end); // sounds
+        empty_array(&mut w, &mut p_end);
+        let links = if links[zone].is_empty() {
+            empty_array(&mut w, &mut p_end);
+            None
+        } else {
+            w.u32(links[zone].len() as u32);
+            Some(w.rel())
+        };
+        let placement_info = w.rel();
+        let at_2c = w.rel();
+        w.u32(0xFFFFFFFF);
+        w.u32(0); // section
+        w.u32(1);
+        // 0x48: a bit for each zone that is never seen from this one, none
+        w.zeros(0x68 - 0x3C);
+        match zoning {
+            Some(zoning) => {
+                let zone_box = zoning.zones[zone].bounds.or_zero();
+                w.f32s(&zone_box.min);
+                w.f32s(&zone_box.max);
+            }
+            None => w.zeros(0x18),
+        }
+        w.zeros(8);
+        p_end.push(w.rel());
+        debug_assert_eq!(w.pos() - start, 0x8C);
+        zone_pointers.push(ZonePointers {
+            identifier,
+            links,
+            placement_info,
+            at_2c,
+        });
+    }
     w.align(16);
 
-    // the tree that says which zone a point is in: one node, everything is zone 0
+    // the tree that says which zone a point is in. without rooms: one node, everything is zone 0
     w.point_here(p_bsp);
-    w.f32s(&[1.0, 0.0, 0.0, 0.0]);
-    w.zeros(16);
+    match zoning {
+        Some(zoning) => {
+            for node in &zoning.tree {
+                w.f32s(&node.plane);
+                w.i16(node.children[0]);
+                w.i16(node.children[1]);
+                w.zeros(12);
+            }
+        }
+        None => {
+            w.f32s(&[1.0, 0.0, 0.0, 0.0]);
+            w.zeros(16);
+        }
+    }
 
-    w.point_here(p_identifier);
-    for v in ZONE_IDENTIFIER {
-        w.u32(v);
+    for pointers in &zone_pointers {
+        w.point_here(pointers.identifier);
+        for (i, v) in ZONE_IDENTIFIER.into_iter().enumerate() {
+            w.u32(if i == ZONE_SKY_INDEX && !sky.is_empty() { 0 } else { v });
+        }
+    }
+
+    // the skies: an entity's hash each (the game's own levels name scripts of entities too)
+    if let Some(p_skies) = p_skies {
+        w.point_here(p_skies);
+        w.u32(HC_LOCAL_ENTITY + entities.len() as u32);
     }
 
     // no triggers: the four tables all point at the zeros behind
@@ -532,91 +995,116 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
     }
     w.zeros(12);
 
-    // which placements the zone has, and the tree a body's surroundings are looked up in
-    w.point_here(p_placement_info);
-    w.u32(entities.len() as u32);
-    let p_zone_placements = w.rel();
-    let p_tree = w.rel();
-    w.point_here(p_zone_placements);
-    for i in 0..entities.len() {
-        w.u16(i as u16);
+    if let (Some(p_portals), Some(zoning)) = (p_portals, zoning) {
+        w.point_here(p_portals);
+        for portal in &zoning.portals {
+            w.u16(portal.zones[0]);
+            w.u16(portal.zones[1]);
+            w.u32(0); // flags (1: not looked through)
+            w.u32(0);
+            w.f32(0.0); // from how far it is looked through, 0: any
+            w.u32(0); // a face that is drawn in it
+            for corner in &portal.corners {
+                w.f32s(corner);
+            }
+        }
+        for (zone, pointers) in zone_pointers.iter().enumerate() {
+            let Some(p_links) = pointers.links else {
+                continue;
+            };
+            w.point_here(p_links);
+            for (i, (to, portal, flipped)) in links[zone].iter().enumerate() {
+                let more = links[zone][i + 1..].iter().take_while(|l| l.0 == *to).count();
+                w.u16(zone as u16);
+                w.u16(*to);
+                w.i16(*portal as i16);
+                w.u8(more.min(255) as u8);
+                w.u8(*flipped as u8);
+            }
+        }
+        w.align(4);
     }
-    w.zeros(4);
-    w.align(16);
-    w.point_here(p_tree);
-    let tree_flags = PLACEMENT_COLLIDES as u8;
-    w.u8(1); // one child
-    w.u8(tree_flags);
-    w.u16(0);
-    let p_leaf = w.rel();
-    w.f32s(&bounds.min);
-    w.f32s(&bounds.max);
-    w.point_here(p_leaf);
-    w.u8(0);
-    w.u8(tree_flags);
-    w.u16(entities.len() as u16);
-    for i in 0..entities.len() {
-        w.u16(i as u16);
-        w.u8(PLACEMENT_COLLIDES as u8);
-        w.u8(0);
+
+    // which placements each zone has, and the tree a body's surroundings are looked up in
+    for (list, pointers) in lists.iter().zip(&zone_pointers) {
+        w.point_here(pointers.placement_info);
+        w.u32(list.len() as u32);
+        let p_zone_placements = w.rel();
+        let p_tree = w.rel();
+        w.point_here(p_zone_placements);
+        for i in list {
+            w.u16(*i as u16);
+        }
+        w.zeros(4);
+        w.align(16);
+        w.point_here(p_tree);
+        let tree = placement_tree(list.clone(), &entities);
+        write_placement_node(&mut w, &tree, &entities, &bounds);
     }
-    w.u32(0);
-    w.align(4);
 
     w.point_here(p_placements);
-    for i in 0..entities.len() {
+    for (i, placed) in entities.iter().enumerate() {
         w.u32(0xFFFFFFFF); // no hash
         w.f32s(&[0.0, 0.0, 0.0]);
         w.u32(0);
         w.f32s(&[0.0, -0.0, -0.0]);
         w.f32s(&[1.0, 1.0, 1.0]);
         w.u16(PLACEMENT_COLLIDES);
-        w.u16(0); // the zone it is in
+        w.u16(placed.zone); // the zone it is in
         w.u32(HC_LOCAL_ENTITY + i as u32);
         w.u16(0); // light set
         w.i16(-1); // group
         w.u32(0);
     }
 
-    w.point_here(p_zone_2c);
-    w.u32(0);
-    let p_a = w.rel();
-    let p_b = w.rel();
-    w.point_here(p_a);
-    w.point_here(p_b);
-    w.zeros(0x1C);
+    for pointers in &zone_pointers {
+        w.point_here(pointers.at_2c);
+        w.u32(0);
+        let p_a = w.rel();
+        let p_b = w.rel();
+        w.point_here(p_a);
+        w.point_here(p_b);
+        w.zeros(0x1C);
+    }
 
     w.align(32);
     for p in p_end {
         w.point_here(p);
     }
 
-    for (entity, at) in entities.iter().zip(&a_entities) {
+    for (placed, at) in entities.iter().zip(&a_entities) {
         w.align(32);
         w.set_u32(*at, w.pos() as u32);
-        match entity {
+        match &placed.entity {
             Entity::Drawn(meshes) => write_split(&mut w, meshes),
             Entity::Hull(hull) => write_mesh_with_collision(&mut w, &unseen_mesh(hull), hull, None),
         };
     }
+    if !sky.is_empty() {
+        w.align(32);
+        w.set_u32(a_entities[entities.len()], w.pos() as u32);
+        write_split(&mut w, &sky);
+    }
 
-    // the zone's own entity (0x608), which refers to an empty group (0x603) through the first
-    // reference pointer: the level's triangles are all placed
-    w.align(32);
-    w.set_u32(a_refptrs[1], w.pos() as u32);
-    w.u32(0x608);
-    w.zeros(0x50);
-    w.u32(0x01000000);
-    w.u32(0);
-    w.zeros(0xC);
-    w.f32(10000.0);
-    w.zeros(0x14);
-    w.set_u32(a_refptrs[0], w.pos() as u32);
-    w.u32(0x603);
-    w.zeros(0x50);
-    w.u32(0);
-    w.u32(8);
-    w.u32(0);
+    // each zone's own entity (0x608), which refers to an empty group (0x603) through the
+    // reference pointer before its own: the level's triangles are all placed
+    for zone in 0..zone_count {
+        w.align(32);
+        w.set_u32(a_refptrs[zone * 2 + 1], w.pos() as u32);
+        w.u32(0x608);
+        w.zeros(0x50);
+        w.u32(0x01000000);
+        w.u32(zone as u32 * 2);
+        w.zeros(0xC);
+        w.f32(10000.0);
+        w.zeros(0x14);
+        w.set_u32(a_refptrs[zone * 2], w.pos() as u32);
+        w.u32(0x603);
+        w.zeros(0x50);
+        w.u32(0);
+        w.u32(8);
+        w.u32(0);
+    }
 
     for (texture, at) in textures.iter().zip(&a_textures) {
         w.align(32);
@@ -632,7 +1120,7 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
     // what the file needs in memory: its size and something for each of its things
     w.set_u32(
         0x24,
-        size + 216 + 36 * textures.len() as u32 + 16 * entities.len() as u32,
+        size + 216 + 36 * textures.len() as u32 + 16 * entity_count as u32 + 256 * (zone_count as u32 - 1),
     );
     w.set_u32(a_section + 4, size);
     w.set_u32(section_start, size);

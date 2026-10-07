@@ -253,7 +253,7 @@ impl EurochefApp {
                     ui.end_row();
                 });
                 ui.add_space(4.0);
-                ui.label("Meshes named collision..., col_... or ucx_... are collided with and not drawn. Without any, the drawn triangles are collided with (not those of a material named ...nocollide...). A node named spawn... is where the player starts.");
+                ui.label("Meshes named collision..., col_... or ucx_... are collided with and not drawn. Without any, the drawn triangles are collided with (not those of a material named ...nocollide...). A node named spawn... is where the player starts. Nodes named RoomXX are rooms and a quad named Portal_XX_YY in an opening joins two: the game then only draws the rooms that are seen.");
                 ui.add_space(4.0);
                 create = ui
                     .add_enabled(
@@ -275,23 +275,29 @@ impl EurochefApp {
                 import: ImportOptions {
                     scale: dialog.scale,
                     bake_light: dialog.bake_light,
+                    ..Default::default()
                 },
             };
-            let made = project::new_map_from_gltf(&dialog.gltf, &options).and_then(|map| {
+            let made = project::new_map_from_gltf(&dialog.gltf, &options).and_then(|mut map| {
                 let path = map.save(&dialog.folder)?;
                 Ok((path, map))
             });
             match made {
                 Ok((path, map)) => {
                     dialog.status = format!(
-                        "Wrote {} (level {:08X}): {} triangles, {} collided with, {} textures. Start the game with GE_LEVEL={:08X}.",
+                        "Wrote {} (level {:08X}): {} triangles, {} collided with, {} textures, {} rooms, {} portals. Start the game with GE_LEVEL={:08X}.",
                         path.display(),
                         map.level_hash,
                         map.stats.drawn_triangles,
                         map.stats.collision_triangles,
                         map.stats.textures,
+                        map.stats.zones,
+                        map.stats.portals,
                         map.level_hash
                     );
+                    for warning in &map.stats.warnings {
+                        dialog.status += &format!(" Warning: {warning}.");
+                    }
                     if let Err(e) = self.load_file_with_path(&path) {
                         self.state = AppState::Error(e);
                     }

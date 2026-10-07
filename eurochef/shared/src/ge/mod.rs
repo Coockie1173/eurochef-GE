@@ -5,6 +5,7 @@ pub mod gltf_import;
 pub mod level;
 pub mod mesh;
 pub mod project;
+pub mod rooms;
 pub mod texture;
 pub mod triggers;
 pub mod writer;

@@ -7,7 +7,9 @@
 use anyhow::ensure;
 
 use super::{
-    triggers::{read_triggers, write_triggers, GeTrigger, LOADED_MAP, TRIGGER_LOAD_MAP, TRIGGER_SPAWN},
+    triggers::{
+        read_triggers, write_triggers, GeTrigger, LOADED_MAP, TRIGGER_LOAD_MAP, TRIGGER_MULTIPLAYER_SPAWN, TRIGGER_SPAWN,
+    },
     writer::Writer,
 };
 
@@ -31,16 +33,34 @@ pub fn spawn_trigger(position: [f32; 3]) -> GeTrigger {
     GeTrigger::with_defaults(TRIGGER_SPAWN, position)
 }
 
-/// Makes a level of a geometry file: it gets the level's hash and a spawn point. The game starts
+/// A spawn point of a multiplayer game. The game's own have data 0 at 1 and the team in data 1
+/// for a team's (Zukovsky's team deathmatch: the two ends of the club), both 0 for anyone's
+pub fn multiplayer_spawn_trigger(position: [f32; 3], yaw: f32, team: Option<u32>) -> GeTrigger {
+    let mut trigger = GeTrigger::with_defaults(TRIGGER_MULTIPLAYER_SPAWN, position);
+    trigger.rotation[1] = yaw;
+    if let Some(team) = team {
+        trigger.data[0] = Some(1);
+        trigger.data[1] = Some(team);
+    }
+    trigger
+}
+
+/// Makes a level of a geometry file: it gets the level's hash, a spawn point and `more` triggers. The game starts
 /// a level when its file is loaded, so the player never stands in a level that isn't there yet
 /// (a geometry file loaded by a trigger of type 62 comes in while the level already runs)
-pub fn make_level_of_geometry(geometry: &[u8], level_hash: u32, spawn: [f32; 3]) -> anyhow::Result<Vec<u8>> {
+pub fn make_level_of_geometry(
+    geometry: &[u8],
+    level_hash: u32,
+    spawn: [f32; 3],
+    more: &[GeTrigger],
+) -> anyhow::Result<Vec<u8>> {
     let mut set = read_triggers(geometry)?;
     ensure!(
         !set.triggers.iter().any(|t| t.type_id == TRIGGER_SPAWN),
         "the file has a spawn point already"
     );
     set.triggers.push(spawn_trigger(spawn));
+    set.triggers.extend(more.iter().cloned());
     let mut w = Writer {
         buf: write_triggers(geometry, &set)?,
     };

@@ -43,6 +43,16 @@ pub enum GeCommand {
         /// Don't shade the vertex colours by a light from above
         #[arg(long)]
         no_light: bool,
+
+        /// Keep the vertex colours linear as glTF has them, not made sRGB (darker)
+        #[arg(long)]
+        linear_colours: bool,
+
+        /// Draw from both sides what the glTF materials say is double sided (Blender: every
+        /// material without Backface Culling). Without it only materials named ...twosided or
+        /// ...nocull are
+        #[arg(long)]
+        gltf_double_sided: bool,
     },
     /// Make only a geometry file from a glTF scene
     Geometry {
@@ -62,6 +72,12 @@ pub enum GeCommand {
 
         #[arg(long)]
         no_light: bool,
+
+        #[arg(long)]
+        linear_colours: bool,
+
+        #[arg(long)]
+        gltf_double_sided: bool,
     },
     /// List the triggers (entities) of a file's map
     Triggers {
@@ -177,6 +193,8 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             spawn,
             scale,
             no_light,
+            linear_colours,
+            gltf_double_sided,
         } => {
             let options = NewMapOptions {
                 name,
@@ -185,10 +203,19 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                 import: ImportOptions {
                     scale,
                     bake_light: !no_light,
+                    linear_colours,
+                    gltf_double_sided,
                 },
             };
-            let map = new_map_from_gltf(&gltf, &options)?;
+            let mut map = new_map_from_gltf(&gltf, &options)?;
+            let wanted = map.level_hash;
             let path = map.save(&output_folder)?;
+            if map.level_hash != wanted {
+                println!(
+                    "level {:08X} is another file's in {}: this one is {:08X}",
+                    wanted, output_folder, map.level_hash
+                );
+            }
             println!(
                 "{}: {} drawn triangles in {} meshes, {} collision triangles in {} meshes, {} textures",
                 gltf,
@@ -198,6 +225,18 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                 map.stats.collision_meshes,
                 map.stats.textures
             );
+            if map.stats.zones > 1 {
+                println!("{} rooms, {} portals", map.stats.zones, map.stats.portals);
+            }
+            if map.stats.multiplayer_spawns > 0 {
+                println!("{} multiplayer spawn points", map.stats.multiplayer_spawns);
+            }
+            if map.stats.sky_triangles > 0 {
+                println!("a sky of {} triangles", map.stats.sky_triangles);
+            }
+            for warning in &map.stats.warnings {
+                println!("warning: {warning}");
+            }
             if let Some(b) = map.stats.bounds {
                 println!(
                     "bounds {:.2} {:.2} {:.2} to {:.2} {:.2} {:.2}, the player starts at {:.2} {:.2} {:.2}",
@@ -213,12 +252,16 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             hash,
             scale,
             no_light,
+            linear_colours,
+            gltf_double_sided,
         } => {
             let scene = import_gltf(
                 &gltf,
                 &ImportOptions {
                     scale,
                     bake_light: !no_light,
+                    linear_colours,
+                    gltf_double_sided,
                 },
             )?;
             let time = std::time::SystemTime::now()

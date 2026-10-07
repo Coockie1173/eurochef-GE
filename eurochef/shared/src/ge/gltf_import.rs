@@ -5,9 +5,24 @@
 //!
 //! Meshes or nodes whose name starts with `collision`, `col_` or `ucx_` aren't drawn: they are
 //! what a body collides with, in place of the drawn triangles. A material with `nocollide` in
-//! its name is left out of the collision that is made from the drawn triangles. A node whose
+//! its name is left out of the collision that is made from the drawn triangles. Triangles are
+//! drawn from their front only, whatever glTF's own double sided says (Blender sets it on every
+//! material that isn't told otherwise): a material with `twosided` or `nocull` in its name is
+//! drawn from behind as well. Meshes or nodes
+//! whose name starts with `collision_add` or `col_add` aren't drawn either and are collided
+//! with on top of whatever else is: a ramp over stairs whose steps are `nocollide`. A node whose
 //! name starts with `spawn` or `player_start` is where the player starts. A node whose name
-//! starts with `reference` or `ref_` is left out with everything below it.
+//! starts with `mp_spawn` is a spawn point of a multiplayer game, looking along the node's own
+//! +z (Blender's -y); `mp_spawn_team0...` and `mp_spawn_team1...` are a team's. A node whose name
+//! starts with `reference` or `ref_` is left out with everything below it. A node whose name
+//! starts with `sky` is the sky, with everything below it: drawn where it stands whichever room
+//! the camera is in, never collided with and not shaded by the importer's light.
+//!
+//! Rooms and portals (see `rooms`): a node named `RoomXX` holds a room, with everything below
+//! it (`Room01`, `Room_01`, `Room01_walls` and `Room01.001` are all room 01). A node named
+//! `Portal_XX_YY` isn't drawn: its mesh, a flat quad in the opening, is the portal between
+//! rooms XX and YY (`Portal_01_02.001` and `Portal_01_02_b` are more of them). Triangles that
+//! are in no room's node go to the room they lie in.
 
 use std::path::Path;
 
@@ -15,7 +30,7 @@ use anyhow::Context;
 use image::RgbaImage;
 
 use super::{
-    geomap::{GeScene, SceneTriangle},
+    geomap::{GeScene, ScenePortal, SceneSpawn, SceneTriangle},
     mesh::{GeVertex, COLOUR_ONE},
     texture::GeTexture,
 };
@@ -27,6 +42,14 @@ pub struct ImportOptions {
     /// Shade the vertex colours by a fixed light from above: the game draws levels with the
     /// light in their vertex colours, and a scene without any looks flat
     pub bake_light: bool,
+    /// Keep the vertex and material colours as the file has them. glTF's are linear and the game
+    /// puts a colour's bytes on the screen as they are, so without this they are made sRGB
+    /// (a linear 0.21 is the 0.5 grey it was painted as): kept linear a scene comes out dark
+    pub linear_colours: bool,
+    /// Draw from both sides what glTF's material says is double sided. Blender says so of every
+    /// material whose backface culling isn't turned on, so without this only a material's name
+    /// (`twosided`, `nocull`) makes it two sided
+    pub gltf_double_sided: bool,
 }
 
 impl Default for ImportOptions {
@@ -34,6 +57,8 @@ impl Default for ImportOptions {
         Self {
             scale: 1.0,
             bake_light: true,
+            linear_colours: false,
+            gltf_double_sided: false,
         }
     }
 }
@@ -42,10 +67,28 @@ const LIGHT_DIRECTION: [f32; 3] = [0.35, 0.85, 0.4];
 const LIGHT_AMBIENT: f32 = 0.55;
 const LIGHT_DIFFUSE: f32 = 0.45;
 
+fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 fn is_collision_name(name: Option<&str>) -> bool {
     name.map(|n| {
         let n = n.to_lowercase();
         n.starts_with("collision") || n.starts_with("col_") || n.starts_with("ucx_")
+    })
+    .unwrap_or(false)
+}
+
+/// Collision that is added to the drawn triangles' (or to the `collision...` meshes')
+fn is_added_collision_name(name: Option<&str>) -> bool {
+    name.map(|n| {
+        let n = n.to_lowercase();
+        n.starts_with("collision_add") || n.starts_with("col_add")
     })
     .unwrap_or(false)
 }
@@ -56,6 +99,56 @@ fn is_reference_name(name: Option<&str>) -> bool {
         n.starts_with("reference") || n.starts_with("ref_")
     })
     .unwrap_or(false)
+}
+
+/// The team of a node named `mp_spawn_teamN...`, None for any other `mp_spawn...`
+fn team_of_name(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("mp_spawn")?.trim_start_matches(['_', ' ', '-']).strip_prefix("team")?;
+    let digits: String = rest.trim_start_matches(['_', ' ', '-']).chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+fn is_sky_name(name: Option<&str>) -> bool {
+    name.map(|n| n.to_lowercase().starts_with("sky")).unwrap_or(false)
+}
+
+/// A name without what Blender puts behind a copy's (`.001`)
+fn without_copy_number(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((head, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => head,
+        _ => name,
+    }
+}
+
+/// How a room is told from another: its name's letters in lower case, a number without the
+/// zeros in front (`01` and `1` are one room)
+fn room_id(text: &str) -> String {
+    let text = text.to_lowercase();
+    if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
+        let number = text.trim_start_matches('0');
+        return if number.is_empty() { "0".to_string() } else { number.to_string() };
+    }
+    text
+}
+
+/// The room a node named `RoomXX...` holds
+fn room_of_name(name: Option<&str>) -> Option<String> {
+    let name = without_copy_number(name?);
+    if !name.get(..4)?.eq_ignore_ascii_case("room") {
+        return None;
+    }
+    let id = name[4..].trim_start_matches(['_', ' ', '-']).split(['_', ' ']).next()?;
+    (!id.is_empty()).then(|| room_id(id))
+}
+
+/// The two rooms a node named `Portal_XX_YY...` joins
+fn portal_of_name(name: Option<&str>) -> Option<[String; 2]> {
+    let name = without_copy_number(name?);
+    if !name.get(..6)?.eq_ignore_ascii_case("portal") {
+        return None;
+    }
+    let mut ids = name[6..].split(['_', ' ', '-']).filter(|t| !t.is_empty());
+    Some([room_id(ids.next()?), room_id(ids.next()?)])
 }
 
 fn to_rgba(image: &gltf::image::Data) -> anyhow::Result<RgbaImage> {
@@ -136,6 +229,23 @@ struct Importer<'a> {
     images: &'a [gltf::image::Data],
     white: Option<usize>,
     skipped_primitives: usize,
+    /// The rooms as their names tell them apart, in the scene's order
+    room_ids: Vec<String>,
+    /// The portals, with the rooms they name
+    portals: Vec<(String, [String; 2], Vec<[[f32; 3]; 3]>)>,
+}
+
+/// What a node is a part of, handed down to the nodes below it
+#[derive(Clone, Copy, Default)]
+struct Inherited {
+    collision: bool,
+    /// Its collision is added to the rest
+    added: bool,
+    room: Option<usize>,
+    /// The portal its triangles are
+    portal: Option<usize>,
+    /// Its triangles are the sky's
+    sky: bool,
 }
 
 impl Importer<'_> {
@@ -174,34 +284,65 @@ impl Importer<'_> {
         Ok(self.white.unwrap())
     }
 
-    fn node(&mut self, node: &gltf::Node<'_>, parent: &[[f32; 4]; 4], collision: bool) -> anyhow::Result<()> {
+    fn node(&mut self, node: &gltf::Node<'_>, parent: &[[f32; 4]; 4], inherited: Inherited) -> anyhow::Result<()> {
         // something to model against (a figure the player's size), not a part of the level
         if is_reference_name(node.name()) {
             return Ok(());
         }
         let matrix = multiply(parent, &node.transform().matrix());
-        let collision = collision || is_collision_name(node.name());
+        let mut part = inherited;
+        part.added |= is_added_collision_name(node.name());
+        part.collision |= part.added || is_collision_name(node.name());
+        let mesh_name = node.mesh().and_then(|m| m.name().map(|n| n.to_string()));
+        part.sky |= is_sky_name(node.name()) || is_sky_name(mesh_name.as_deref());
+        if !part.sky && part.portal.is_none() {
+            if let Some(rooms) = portal_of_name(node.name()).or_else(|| portal_of_name(mesh_name.as_deref())) {
+                let name = node.name().or(mesh_name.as_deref()).unwrap_or("portal").to_string();
+                self.portals.push((name, rooms, vec![]));
+                part.portal = Some(self.portals.len() - 1);
+            } else if let Some(id) = room_of_name(node.name()).or_else(|| room_of_name(mesh_name.as_deref())) {
+                part.room = Some(match self.room_ids.iter().position(|r| *r == id) {
+                    Some(room) => room,
+                    None => {
+                        self.room_ids.push(id);
+                        self.scene.rooms.push(without_copy_number(node.name().or(mesh_name.as_deref()).unwrap_or("room")).to_string());
+                        self.room_ids.len() - 1
+                    }
+                });
+            }
+        }
 
         let name = node.name().unwrap_or("").to_lowercase();
-        if name.starts_with("spawn") || name.starts_with("player_start") || name.starts_with("playerstart") {
+        if name.starts_with("mp_spawn") {
+            let p = transform_point(&matrix, [0.0, 0.0, 0.0]);
+            let ahead = transform_direction(&matrix, [0.0, 0.0, 1.0]);
+            let scale = self.options.scale;
+            self.scene.multiplayer_spawns.push(SceneSpawn {
+                position: [-p[0] * scale, p[1] * scale, p[2] * scale],
+                yaw: (-ahead[0]).atan2(ahead[2]),
+                team: team_of_name(&name),
+            });
+        } else if name.starts_with("spawn") || name.starts_with("player_start") || name.starts_with("playerstart") {
             let p = transform_point(&matrix, [0.0, 0.0, 0.0]);
             let scale = self.options.scale;
             self.scene.spawn = Some([-p[0] * scale, p[1] * scale, p[2] * scale]);
         }
 
         if let Some(mesh) = node.mesh() {
-            let collision = collision || is_collision_name(mesh.name());
+            let mut part = part;
+            part.added |= is_added_collision_name(mesh.name());
+            part.collision |= part.added || is_collision_name(mesh.name());
             for primitive in mesh.primitives() {
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
                     self.skipped_primitives += 1;
                     continue;
                 }
-                self.primitive(&primitive, &matrix, collision)?;
+                self.primitive(&primitive, &matrix, part)?;
             }
         }
 
         for child in node.children() {
-            self.node(&child, &matrix, collision)?;
+            self.node(&child, &matrix, part)?;
         }
         Ok(())
     }
@@ -210,7 +351,7 @@ impl Importer<'_> {
         &mut self,
         primitive: &gltf::Primitive<'_>,
         matrix: &[[f32; 4]; 4],
-        collision: bool,
+        part: Inherited,
     ) -> anyhow::Result<()> {
         let buffers = self.buffers;
         let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
@@ -235,9 +376,17 @@ impl Importer<'_> {
             .filter(|t| t.iter().all(|i| (*i as usize) < positions.len()))
             .map(|t| [t[0] as usize, t[2] as usize, t[1] as usize]);
 
-        if collision {
+        let is_sky = part.sky;
+        if let (Some(portal), false) = (part.portal, is_sky) {
             for t in triangles {
-                self.scene.collision.push([positions[t[0]], positions[t[1]], positions[t[2]]]);
+                self.portals[portal].2.push([positions[t[0]], positions[t[1]], positions[t[2]]]);
+            }
+            return Ok(());
+        }
+        if part.collision && !is_sky {
+            let list = if part.added { &mut self.scene.added_collision } else { &mut self.scene.collision };
+            for t in triangles {
+                list.push([positions[t[0]], positions[t[1]], positions[t[2]]]);
             }
             return Ok(());
         }
@@ -255,10 +404,12 @@ impl Importer<'_> {
         let material = primitive.material();
         let factor = material.pbr_metallic_roughness().base_color_factor();
         let texture = self.texture_for(&material)?;
-        let no_collision = material
-            .name()
-            .map(|n| n.to_lowercase().contains("nocollide"))
-            .unwrap_or(false);
+        let material_name = material.name().map(|n| n.to_lowercase()).unwrap_or_default();
+        let no_collision = material_name.contains("nocollide");
+        let two_sided = (self.options.gltf_double_sided && material.double_sided())
+            || ["twosided", "two_sided", "doublesided", "double_sided", "nocull"]
+                .iter()
+                .any(|tag| material_name.contains(tag));
 
         for t in triangles {
             let corners = [positions[t[0]], positions[t[1]], positions[t[2]]];
@@ -275,7 +426,12 @@ impl Importer<'_> {
                 for k in 0..4 {
                     colour[k] *= factor[k];
                 }
-                if self.options.bake_light {
+                if !self.options.linear_colours {
+                    for c in colour.iter_mut().take(3) {
+                        *c = linear_to_srgb(*c);
+                    }
+                }
+                if self.options.bake_light && !is_sky {
                     let light = transform_direction(
                         &[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0; 4]],
                         LIGHT_DIRECTION,
@@ -298,11 +454,18 @@ impl Importer<'_> {
                     ],
                 }
             });
-            self.scene.triangles.push(SceneTriangle {
+            let triangle = SceneTriangle {
                 texture: Some(texture),
                 vertices,
-                no_collision,
-            });
+                no_collision: no_collision || is_sky,
+                room: part.room,
+                two_sided,
+            };
+            if is_sky {
+                self.scene.sky.push(triangle);
+            } else {
+                self.scene.triangles.push(triangle);
+            }
         }
         Ok(())
     }
@@ -322,6 +485,8 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         images: &images,
         white: None,
         skipped_primitives: 0,
+        room_ids: vec![],
+        portals: vec![],
     };
 
     let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
@@ -331,7 +496,7 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
     };
     for scene in scenes {
         for node in scene.nodes() {
-            importer.node(&node, &identity, false)?;
+            importer.node(&node, &identity, Inherited::default())?;
         }
     }
 
@@ -342,6 +507,24 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
             path.display()
         );
     }
+    for (name, ids, triangles) in std::mem::take(&mut importer.portals) {
+        let room = |id: &String| {
+            importer.room_ids.iter().position(|r| r == id).with_context(|| {
+                format!("portal {name} is between rooms {} and {}, but no node is named Room{id}", ids[0], ids[1])
+            })
+        };
+        importer.scene.portals.push(ScenePortal {
+            rooms: [room(&ids[0])?, room(&ids[1])?],
+            name,
+            triangles,
+        });
+    }
+    anyhow::ensure!(
+        importer.scene.portals.is_empty() || !importer.scene.rooms.is_empty(),
+        "{} has portals but no rooms",
+        path.display()
+    );
+
     anyhow::ensure!(
         !importer.scene.triangles.is_empty() || !importer.scene.collision.is_empty(),
         "{} has no triangles",

@@ -8,8 +8,11 @@ use anyhow::Context;
 use super::{
     geomap::{build_geometry_file, BuildStats, GeScene},
     gltf_import::{import_gltf, ImportOptions},
-    level::{level_hash, make_level_of_geometry},
+    level::{level_hash, make_level_of_geometry, multiplayer_spawn_trigger},
 };
+
+/// How far below a floor a multiplayer spawn point may be modelled and still be put on it
+const MULTIPLAYER_SPAWN_REACH: f32 = 0.3;
 
 #[derive(Clone, Debug)]
 pub struct NewMapOptions {
@@ -42,11 +45,35 @@ pub struct NewMap {
 }
 
 impl NewMap {
-    /// Writes the level's file into a folder and returns its path
-    pub fn save<P: AsRef<Path>>(&self, folder: P) -> anyhow::Result<PathBuf> {
+    /// Writes the level's file into a folder and returns its path. When another file in the
+    /// folder has the level's hash already (two levels made with the same number), the level
+    /// gets the next hash that no file there has
+    pub fn save<P: AsRef<Path>>(&mut self, folder: P) -> anyhow::Result<PathBuf> {
         let folder = folder.as_ref();
         std::fs::create_dir_all(folder).with_context(|| format!("couldn't create {}", folder.display()))?;
         let path = folder.join(&self.file_name);
+
+        let mut taken = vec![];
+        if let Ok(entries) = std::fs::read_dir(folder) {
+            for entry in entries.flatten() {
+                let other = entry.path();
+                if other == path || other.extension().map(|e| e != "edb").unwrap_or(true) {
+                    continue;
+                }
+                let mut head = [0u8; 8];
+                if std::fs::File::open(&other)
+                    .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
+                    .is_ok()
+                {
+                    taken.push(u32::from_be_bytes(head[4..8].try_into().unwrap()));
+                }
+            }
+        }
+        while taken.contains(&self.level_hash) && self.level_hash & 0xFFFF != 0xFFFF {
+            self.level_hash += 1;
+        }
+        self.data[4..8].copy_from_slice(&self.level_hash.to_be_bytes());
+
         std::fs::write(&path, &self.data).with_context(|| format!("couldn't write {}", path.display()))?;
         Ok(path)
     }
@@ -73,8 +100,25 @@ pub fn new_map_from_scene(scene: &GeScene, options: &NewMapOptions) -> anyhow::R
     let level_hash = level_hash(options.id);
     let spawn = options.spawn.unwrap_or_else(|| scene.default_spawn());
 
-    let (geometry, stats) = build_geometry_file(scene, level_hash, time);
-    let data = make_level_of_geometry(&geometry, level_hash, spawn).context("couldn't add the spawn point")?;
+    let (geometry, mut stats) = build_geometry_file(scene, level_hash, time);
+    // the game stops for good on a multiplayer spawn point without floor within a metre below
+    // it: each is put on the floor it stands over
+    let mut more = vec![];
+    for point in &scene.multiplayer_spawns {
+        let [x, y, z] = point.position;
+        let y = match scene.floor_at(x, z, Some(y + MULTIPLAYER_SPAWN_REACH)) {
+            Some(floor) => floor + 0.02,
+            None => {
+                stats.warnings.push(format!(
+                    "the multiplayer spawn point at {x:.2} {y:.2} {z:.2} has no floor below it, the game doesn't start a level with one"
+                ));
+                y
+            }
+        };
+        more.push(multiplayer_spawn_trigger([x, y, z], point.yaw, point.team));
+    }
+    stats.multiplayer_spawns = more.len();
+    let data = make_level_of_geometry(&geometry, level_hash, spawn, &more).context("couldn't add the spawn point")?;
 
     Ok(NewMap {
         file_name: format!("mt_{}.edb", file_name_part(&options.name)),
