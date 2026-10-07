@@ -1513,6 +1513,7 @@ dependencies = [
  "nohash-hasher",
  "parse_int",
  "serde",
+ "serde_json",
  "serde_yaml",
  "squish",
  "thiserror 1.0.69",

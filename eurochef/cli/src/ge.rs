@@ -84,6 +84,16 @@ pub enum GeCommand {
         /// .edb file to read
         filename: String,
     },
+    /// Write the triggers of a file's map as a glTF scene of named nodes (spawn, mp_spawn_...,
+    /// trigger_NNN_TYPE), the names `new-map` reads
+    ExportTriggers {
+        /// .edb file to read
+        filename: String,
+
+        /// The .gltf file to write
+        #[arg(short, long)]
+        output: String,
+    },
     /// Change the triggers (entities) of a file's map and write the file again
     EditTriggers {
         /// .edb file to read
@@ -280,6 +290,14 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             for (i, t) in set.triggers.iter().enumerate() {
                 println!("{}", describe(i, t));
             }
+            Ok(())
+        }
+        GeCommand::ExportTriggers { filename, output } => {
+            let data = std::fs::read(&filename).with_context(|| format!("couldn't read {filename}"))?;
+            let set = read_triggers(&data)?;
+            let text = eurochef_shared::ge::gltf_export::export_triggers_gltf(&set.triggers, &|_| None)?;
+            std::fs::write(&output, text).with_context(|| format!("couldn't write {output}"))?;
+            println!("{output}: {} trigger(s)", set.triggers.len());
             Ok(())
         }
         GeCommand::EditTriggers {

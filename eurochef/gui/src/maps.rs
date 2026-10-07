@@ -171,6 +171,7 @@ impl MapViewerPanel {
             None => format!("0x{:x}", ttype),
         };
         let mut save_clicked = false;
+        let mut export_clicked = false;
 
         egui::Window::new("Entities")
             .default_pos([ctx.screen_rect().right() - 340.0, 110.0])
@@ -321,6 +322,10 @@ impl MapViewerPanel {
                         .add_enabled(can_save, egui::Button::new("Save EDB as..."))
                         .on_disabled_hover_text("Only the triggers of a file's first map can be written")
                         .clicked();
+                    export_clicked = ui
+                        .button("Export triggers as glTF...")
+                        .on_hover_text("One named node for each trigger of this map: spawn, mp_spawn_..., trigger_NNN_TYPE")
+                        .clicked();
                     if editor.changed {
                         ui.label("changed");
                     }
@@ -352,19 +357,32 @@ impl MapViewerPanel {
                 };
             }
         }
+
+        if export_clicked {
+            let mut dialog = rfd::FileDialog::new().add_filter("glTF", &["gltf"]);
+            if let Some((path, _)) = self.source.as_ref() {
+                let start = std::path::Path::new(path);
+                if let Some(dir) = start.parent() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(stem) = start.file_stem() {
+                    dialog = dialog.set_file_name(format!("{}_triggers.gltf", stem.to_string_lossy()));
+                }
+            }
+            if let Some(target) = dialog.save_file() {
+                self.editor.status = match self.export_triggers_gltf(&target) {
+                    Ok(count) => format!("Wrote {} ({} triggers)", target.display(), count),
+                    Err(e) => format!("Not written: {e:#}"),
+                };
+            }
+        }
     }
 
-    /// Writes the file with the first map's triggers as they are now
-    pub fn save_triggers(&self, target: &std::path::Path) -> anyhow::Result<usize> {
-        use eurochef_shared::ge::triggers::{read_triggers, write_triggers, GeTrigger};
+    /// A map's triggers as they are now, the way the file has them
+    fn ge_triggers(map: &ProcessedMap) -> Vec<eurochef_shared::ge::triggers::GeTrigger> {
+        use eurochef_shared::ge::triggers::GeTrigger;
 
-        let (_, data) = self
-            .source
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("the file's data isn't known"))?;
-        let map = self.maps.first().ok_or_else(|| anyhow::anyhow!("no map"))?;
-        let mut set = read_triggers(data)?;
-        set.triggers = map
+        map
             .triggers
             .iter()
             .map(|t| {
@@ -397,7 +415,35 @@ impl MapViewerPanel {
                 ];
                 out
             })
-            .collect();
+            .collect()
+    }
+
+    /// Writes the selected map's triggers as a glTF scene of named nodes
+    pub fn export_triggers_gltf(&self, target: &std::path::Path) -> anyhow::Result<usize> {
+        let map = self
+            .maps
+            .get(self.frame.selected_map)
+            .ok_or_else(|| anyhow::anyhow!("no map"))?;
+        let triggers = Self::ge_triggers(map);
+        let info = self.frame.trigger_info.clone();
+        let text = eurochef_shared::ge::gltf_export::export_triggers_gltf(&triggers, &|ttype| {
+            info.triggers.get(&ttype).map(|def| def.name.clone())
+        })?;
+        std::fs::write(target, text).with_context(|| format!("couldn't write {}", target.display()))?;
+        Ok(triggers.len())
+    }
+
+    /// Writes the file with the first map's triggers as they are now
+    pub fn save_triggers(&self, target: &std::path::Path) -> anyhow::Result<usize> {
+        use eurochef_shared::ge::triggers::{read_triggers, write_triggers};
+
+        let (_, data) = self
+            .source
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("the file's data isn't known"))?;
+        let map = self.maps.first().ok_or_else(|| anyhow::anyhow!("no map"))?;
+        let mut set = read_triggers(data)?;
+        set.triggers = Self::ge_triggers(map);
         let out = write_triggers(data, &set)?;
         std::fs::write(target, &out).with_context(|| format!("couldn't write {}", target.display()))?;
         Ok(out.len())

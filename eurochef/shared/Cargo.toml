@@ -14,6 +14,7 @@ bytemuck = { version = "1.13", features = ["derive"] }
 enumn = "0.1"
 image = { version = "0.24", default-features = false, features = ["png", "tga"] }
 serde = { version =  "1", features = ["derive"] }
+serde_json = "1"
 serde_yaml = "0.9"
 squish = "1.0"
 tracing = "0.1.37"
