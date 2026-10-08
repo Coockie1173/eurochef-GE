@@ -117,8 +117,10 @@ impl SkyArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum GeCommand {
-    /// Make a new level from a glTF scene: mt_NAME.edb, with its geometry, textures, collision
-    /// and the player's spawn point
+    /// Make a new level from a glTF scene: mg_NAME.edb with its geometry, textures and
+    /// collision, mt_NAME.edb that loads it with the player's spawn point, and one more
+    /// mt_NAME.edb in the folder of each online gamemode the scene has the spawn points and
+    /// things of (conflict/, golden_gun/, ...)
     NewMap {
         /// .gltf or .glb file
         gltf: String,
@@ -152,11 +154,38 @@ pub enum GeCommand {
         #[arg(long)]
         linear_colours: bool,
 
+        /// Every vertex colour times this: 1.5 is half again as bright
+        #[arg(long, default_value_t = 1.0)]
+        brightness: f32,
+
         /// Draw from both sides what the glTF materials say is double sided (Blender: every
         /// material without Backface Culling). Without it only materials named ...twosided or
         /// ...nocull are
         #[arg(long)]
         gltf_double_sided: bool,
+
+        /// Who the players of an online game are in the level: a character's name as the game
+        /// shows it, for the four of that character's set ("Jones": Jones, Davis, Smyth, Adams).
+        /// Written to mt_NAME.txt, which the port reads
+        #[arg(long, value_name = "CHARACTER")]
+        team0: Option<String>,
+
+        /// The other team's
+        #[arg(long, value_name = "CHARACTER")]
+        team1: Option<String>,
+
+        /// The first team's hero in Heroes, a character's name ("Bond")
+        #[arg(long, value_name = "CHARACTER")]
+        hero0: Option<String>,
+
+        /// The other team's hero
+        #[arg(long, value_name = "CHARACTER")]
+        hero1: Option<String>,
+
+        /// Make the level one file, as it was before: no gamemodes, every multiplayer spawn
+        /// point in it
+        #[arg(long)]
+        one_file: bool,
 
         #[command(flatten)]
         sky: SkyArgs,
@@ -182,6 +211,9 @@ pub enum GeCommand {
 
         #[arg(long)]
         linear_colours: bool,
+
+        #[arg(long, default_value_t = 1.0)]
+        brightness: f32,
 
         #[arg(long)]
         gltf_double_sided: bool,
@@ -335,7 +367,13 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             scale,
             no_light,
             linear_colours,
+            brightness,
             gltf_double_sided,
+            one_file,
+            team0,
+            team1,
+            hero0,
+            hero1,
             sky,
         } => {
             let options = NewMapOptions {
@@ -347,12 +385,14 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     bake_light: !no_light,
                     linear_colours,
                     gltf_double_sided,
+                    brightness,
                 },
                 sky: sky.options(false)?,
+                split: !one_file,
             };
             let mut map = new_map_from_gltf(&gltf, &options)?;
             let wanted = map.level_hash;
-            let path = map.save(&output_folder)?;
+            let saved = map.save(&output_folder)?;
             if map.level_hash != wanted {
                 println!(
                     "level {:08X} is another file's in {}: this one is {:08X}",
@@ -392,7 +432,26 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2], map.spawn[0], map.spawn[1], map.spawn[2]
                 );
             }
-            println!("{} (level {:08X}, {} bytes)", path.display(), map.level_hash, map.data.len());
+            let cast: String = [("team0", team0), ("team1", team1), ("hero0", hero0), ("hero1", hero1)]
+                .into_iter()
+                .filter_map(|(key, name)| name.map(|name| format!("{key} = {name}\n")))
+                .collect();
+            if !cast.is_empty() {
+                let path = saved[0].path.with_extension("txt");
+                std::fs::write(&path, &cast).with_context(|| format!("couldn't write {}", path.display()))?;
+                println!("{} (who the players are online)", path.display());
+            }
+            for (mode, why) in &map.left_out {
+                println!("no level for {}: {why}", mode.folder());
+            }
+            for file in &saved {
+                let what = match file.mode {
+                    Some(mode) => mode.folder(),
+                    None if file.hash == map.level_hash => "level",
+                    None => "geometry",
+                };
+                println!("{} ({what} {:08X}, {} bytes)", file.path.display(), file.hash, file.size);
+            }
             Ok(())
         }
         GeCommand::Geometry {
@@ -402,6 +461,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             scale,
             no_light,
             linear_colours,
+            brightness,
             gltf_double_sided,
         } => {
             let scene = import_gltf(
@@ -411,6 +471,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     bake_light: !no_light,
                     linear_colours,
                     gltf_double_sided,
+                    brightness,
                 },
             )?;
             let time = std::time::SystemTime::now()

@@ -40,6 +40,8 @@ pub const EDB_VERSION: u32 = 263;
 const FILE_FLAGS: u32 = 0x20000006;
 const SECTION_FLAGS: u32 = 0x9007;
 pub const HC_MAP: u32 = 0x0500000D;
+/// The map of a file that is only triggers, as the game's own (mpt_*) have it
+pub const HC_TRIGGER_MAP: u32 = 0x0500001E;
 const HC_SECTION: u32 = 0x08000000;
 const HC_DEFAULT_TEXTURE: u32 = 0x06000000;
 const HC_LOCAL_ENTITY: u32 = 0x82000000;
@@ -102,6 +104,26 @@ pub struct SceneSpawn {
     pub yaw: f32,
     /// The team it belongs to in a team game, None: anyone's
     pub team: Option<u32>,
+}
+
+/// What a gamemode has in a level besides spawn points
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeItemKind {
+    /// Where Golden Gun's gun lies
+    GoldenGun,
+    /// One of GoldenEye's consoles
+    Console,
+    /// Where Black Box's box lies
+    BlackBox,
+}
+
+/// A gamemode's thing as the scene has it
+#[derive(Clone, Debug)]
+pub struct SceneModeItem {
+    pub kind: ModeItemKind,
+    /// The node's name: the consoles are numbered in the order of their names
+    pub name: String,
+    pub position: [f32; 3],
 }
 
 /// An edge the player gets over or onto with the action button: the rim of an obstacle's top.
@@ -284,6 +306,8 @@ pub struct GeScene {
     /// The sky's triangles, where they stand in the level. Empty: no sky
     pub sky: Vec<SceneTriangle>,
     pub multiplayer_spawns: Vec<SceneSpawn>,
+    /// The golden gun, the consoles and the black box: what only some gamemodes have
+    pub mode_items: Vec<SceneModeItem>,
     /// What the player vaults over and climbs onto
     pub edges: Vec<SceneEdge>,
     pub ladders: Vec<SceneLadder>,
@@ -1008,6 +1032,16 @@ fn list_head(w: &mut Writer, count: usize, hashes: i16) -> usize {
 }
 
 pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u8>, BuildStats) {
+    build_map_file(scene, file_hash, HC_MAP, time)
+}
+
+/// A file with nothing in its map: what a level that loads its geometry from another file is
+/// before it gets its triggers
+pub fn build_empty_file(file_hash: u32, time: u32) -> Vec<u8> {
+    build_map_file(&GeScene::default(), file_hash, HC_TRIGGER_MAP, time).0
+}
+
+fn build_map_file(scene: &GeScene, file_hash: u32, map_hash: u32, time: u32) -> (Vec<u8>, BuildStats) {
     let mut stats = BuildStats::default();
     let zoning = make_zoning(scene);
     let zoning = zoning.as_ref();
@@ -1078,7 +1112,7 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
     };
 
     w.point_here(p_maps);
-    w.u32(HC_MAP);
+    w.u32(map_hash);
     w.u32(0);
     let a_map = w.pos();
     w.u32(0);

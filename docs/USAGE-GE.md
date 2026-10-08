@@ -38,23 +38,36 @@ docs/usage-ge/example.gltf: 298 drawn triangles in 2 meshes, 242 collision trian
 4 multiplayer spawn points
 a sky of 10 triangles
 bounds -20.00 0.00 -10.00 to 10.00 5.00 10.00, the player starts at -0.00 0.00 0.00
-mods/mt_example.edb (level 01810209, 62816 bytes)
+no level for conflict: no node named mp_spawn...
+no level for golden_gun: no node named mp_spawn...
+no level for black_box: no node named black_box...
+no level for goldeneye: no node named goldeneye...
+no level for license_to_kill: no node named mp_spawn...
+mods/mt_example.edb (level 01810209, 1760 bytes)
+mods/mg_example.edb (geometry 018B0109, 62368 bytes)
+mods/team_conflict/mt_example.edb (team_conflict 01811049, 2048 bytes)
+mods/heroes/mt_example.edb (heroes 0181104D, 2048 bytes)
+mods/team_license_to_kill/mt_example.edb (team_license_to_kill 0181104F, 2048 bytes)
 ```
-That's it. One file, `mt_example.edb`. Put it in the game's `mods` folder and it shows up under Extras > Mods*.
+That's it. `-o` is the game's `mods` folder: the level shows up under Extras > Mods*, and online in every gamemode it got a file for (see Gamemodes).
+
+The level is made the way the game's own multiplayer maps are: everything you modelled is in `mg_example.edb`, once, and each `mt_example.edb` is a tiny file of triggers (spawn points and such) that loads it. `--one-file` gives you the old single `mt_example.edb` with everything in it and no gamemodes.
 Read that output, by the way. If it says `0 ladders` and you made a ladder, you named something wrong, and it's a lot faster to notice here than after walking into a wall for a minute.
 
-<sub>*In the recompiled PC port, which is what loads loose `.edb` files. The level's number (`--id`) decides its hash: 1 is `01810201`, 9 is `01810209`. Two levels with the same number? The second one gets the next free one.</sub>
+<sub>*In the recompiled PC port, which is what loads loose `.edb` files. The level's number (`--id`) decides its hashes: 1 is `01810201`, 9 is `01810209`, its geometry `018B0100 + id` and its gamemodes' levels `01811000 + id * 8` and the seven after. Two levels with the same number? The second one gets the next free ones.</sub>
 
 | Option | What it does |
 |--------|--------------|
-| `--name` | The file becomes `mt_NAME.edb` |
+| `--name` | The files become `mt_NAME.edb` and `mg_NAME.edb` |
 | `--id` | The level's number, its hash is `0181 0200 + id` |
 | `-o` | The folder it goes in |
 | `--spawn x,y,z` | Where the player starts, in the game's coordinates. Wins over the scene's `spawn` node |
 | `--scale` | Game units for one unit of the scene. The game is in metres, so is glTF, so leave it |
 | `--no-light` | Don't shade the vertex colours by a light from above |
+| `--brightness N` | Every vertex colour times N. 1.5 is half again as bright, the game stops at about 2 for a white vertex |
 | `--linear-colours` | Keep the colours as glTF has them (darker) |
 | `--gltf-double-sided` | Believe glTF's "double sided" flag (see Colours and sides) |
+| `--one-file` | One `mt_NAME.edb` with the geometry in it, no gamemodes |
 | `--sky PRESET` | Make a sky around the level (see The sky) |
 
 ## The names
@@ -68,6 +81,9 @@ This is the whole interface. A mesh or a node (an object in Blender) whose name 
 | `spawn`, `player_start` | Where the player starts | — | — |
 | `mp_spawn` | A multiplayer spawn point | — | — |
 | `mp_spawn_team0`, `mp_spawn_team1` | A team's spawn point | — | — |
+| `golden_gun` | Where Golden Gun's gun lies | — | — |
+| `goldeneye` | One of GoldenEye's consoles | — | — |
+| `black_box` | Where Black Box's box lies | — | — |
 | `RoomXX` | A room, with everything below it | yes | yes |
 | `Portal_XX_YY` | The opening between rooms XX and YY | no | no |
 | `sky` | The sky, with everything below it | yes | no |
@@ -92,8 +108,8 @@ Metres. The player is 0.5 wide and 1.7 tall, the eye is at 1.5 standing and 0.9 
 The game's levels are the mirror image of glTF: x gets negated on import. You don't have to care about this while modelling, the level looks the way you made it. You do have to care when you type coordinates (`--spawn`, moving triggers): **what is at x 5 in Blender is at x -5 in the game**. Everything the CLI prints is in the game's coordinates.
 
 ## Colours and sides
-The game draws levels unlit, the light is in the vertex colours. So the importer shades them by a fixed light from above (floors bright, walls a bit darker), which is why the example doesn't look like a grey blob. If you baked your own light into the vertex colours, pass `--no-light`.
-Colours get made sRGB, so a grey you painted as 0.5 comes out as 0.5.
+The game draws levels unlit, the light is in the vertex colours. So the importer shades them by a fixed light from above (floors bright, walls a bit darker), which is why the example doesn't look like a grey blob. A mesh whose vertex colours you painted yourself (anything that isn't all white) has its light already and is left alone, shading it again would only make it darker. `--no-light` turns the importer's light off for the rest too.
+Colours get made sRGB, so a grey you painted as 0.5 comes out as 0.5. A white, unshaded vertex shows the texture exactly as it is. Blender lights your scene on top of that and the game doesn't, so when it still comes out darker than what you were looking at, `--brightness 1.5` (or the slider in the window) is the knob.
 Triangles are drawn from their front only, where Blender's normal points. Blender marks every material without Backface Culling as "double sided" in glTF, which would make everything double sided, so that flag is ignored unless you pass `--gltf-double-sided`. Want one fence to be seen from both sides? Name its material `fence_twosided`.
 Textures are resized to powers of two between 8 and 1024. Alpha is one bit: there or not there.
 
@@ -109,6 +125,126 @@ The fix is a ramp nobody sees. In the example the steps have a material named `s
 - `spawn`: an empty where the player starts. Without one you start on the floor in the middle of the scene, which is usually inside something.
 - `mp_spawn`, as many as you want (`mp_spawn.001`, `mp_spawn_roof`...). The player looks along the node's own +z, that's -y in Blender.
 - `mp_spawn_team0...` and `mp_spawn_team1...` for team games.
+
+## Gamemodes
+One scene, every gamemode: put all of it in the same file and `ge new-map` sorts out which gamemode gets what. The geometry is shared, only the triggers differ.
+
+| Gamemode (its folder) | Gets | Is made when the scene has |
+|-----------------------|------|----------------------------|
+| `conflict`, `license_to_kill` | `mp_spawn` | an `mp_spawn` |
+| `golden_gun` | `mp_spawn`, `golden_gun` | an `mp_spawn` and a `golden_gun` |
+| `team_conflict`, `heroes`, `team_license_to_kill` | `mp_spawn`, `mp_spawn_team0`, `mp_spawn_team1` | a spawn point for each team |
+| `goldeneye` | the same, and `goldeneye` | a spawn point for each team and a `goldeneye` |
+| `black_box` | the same, and `black_box` | a spawn point for each team and a `black_box` |
+
+So the golden gun never ends up in Conflict, and a map without a `black_box` simply isn't in Black Box's list. The output says which gamemodes were left out and what they're missing.
+
+- `golden_gun`, `goldeneye...` and `black_box` are empties, like the spawn points. They stay exactly where you put them (not dropped to the floor), the game draws its own gun, console and box there.
+- The game's own maps have one gun, one box and five consoles. The consoles are numbered in the order of their names, so `goldeneye_1` to `goldeneye_5`.
+- The team gamemodes get the plain `mp_spawn` points too, the game's own maps have both.
+- A gamemode you had before and don't any more (you deleted the `golden_gun`) leaves its old file behind in the folder. You get a warning, delete it yourself.
+
+`ge export-triggers` on one of the game's own (`mpt_dubai_gec.edb`...) gives you these same names, if you want to see where the game put its consoles.
+
+## Who the players are
+Online, the game dresses the two teams by the map: Facility is Red-one's lot against Pvt. Gurov's, with Bond and Ourumov as the heroes. A level of yours gets Archives' unless you say otherwise:
+```
+eurochef-cli ge new-map yard.glb --name yard --id 1 -o mods/ --team0 Jones --team1 Oddjob --hero0 Bond --hero1 Zukovsky
+```
+That writes `mods/mt_yard.txt` (a `team0 = Jones` line each, edit it by hand all you want), which the port reads for every gamemode of the map. A value is a name as the game shows it, or a hash (`team0 = 4D000031`). Split screen doesn't care about any of this, everyone picks their own there, and Classic Conflict always has its two sets of villains.
+
+### Teams
+A team is one of the game's sets of characters, handed out to the players in turn. Name any one member, or give the set's hash. These are the ones whose members have names:
+
+| Set | Members | Where the game uses it online |
+|-----|---------|-------------------------------|
+| `4D000030` | Jones, Davis, Smyth, Adams | Railyard, Statue Park, Zukovsky's, Docks |
+| `4D000031` | Red-one, Red-four, Red-five, Red-nine | Facility, Archives, Underground, Jungle, Annex |
+| `4D00003F` | Agent Zero, Agent Two, Agent Four, Agent Six | Sevproto |
+| `4D000032` | Two-Two, Two-Four, Two-Six, Two-Seven | Railyard, Statue Park (the other team) |
+| `4D000033` | Five-One, Five-Two, Five-Three, Five-Four | Underground, Jungle (the other team) |
+| `4D000035` | Pvt. Gurov, Pvt. Harkov, Pvt. Kozmin, Pvt. Shkadov | Facility, Archives (the other team) |
+| `4D000040` | Sgt. Morozov, Sgt. Zotkin, Sgt. Udalov, Sgt. Shubkin | Sevproto, Annex (the other team) |
+| `4D00002F` | Vincent, Slav, Boris, Alfonso | Zukovsky's, Docks (the other team) |
+| `4D000041` | Oddjob, Jaws, Blofeld, Scaramanga | Classic Conflict |
+| `4D000042` | Dr. No, Baron Samedi, Rosa Klebb, Red Grant | Classic Conflict |
+| `4D000034` | Sgt. Glebov, Sgt. Baikov, Sgt. Chzov, Sgt. Drashev | not online |
+| `4D000043` | Bond, Natalya | not as a team |
+| `4D000044` | Trevelyan, Onatopp, Ourumov, Zukovsky, Mishkin | not as a team |
+| `4D000045` | HazMat, Soldier, Pilot, Security, Sky Briggs | not as a team |
+
+Only the first ten are what the game's own online maps use, the rest is untried as a team.
+
+The game has 40 more sets, the campaign's people. Their members have placeholder names or none, so these go by hash only (how many are in each in brackets):
+
+| Set | Members |
+|-----|---------|
+| `4D000005` | CAMO RUSSIAN1, CAMO RUSSIAN2 (twice), two without a name (5) |
+| `4D000006` | CHAR #17, CHAR #18 |
+| `4D000008` | CAMO RUSSIAN4, 5, 7, 8 |
+| `4D000009` | CAMO RUSSIAN6, CAMO RUSSIAN9 |
+| `4D00000A` | CHAR #20, #23, #25, #26 |
+| `4D00000B` | SNOW RUSSIAN1, 2, 3 |
+| `4D00000C` | CHAR #19 |
+| `4D00002C` | CHAR #39, one without a name |
+| `4D000039` | CHAR #32, two without a name |
+| `4D00003A` | CAMO RUSSIAN9, CHAR #16 |
+| `4D00003B` | CAMO RUSSIAN3, one without a name |
+
+Without any names: `4D00000D` (4), `4D000011` (2), `4D000012` (3), `4D000013` (14), `4D000014` (4), `4D000015` (18), `4D000016` (11), `4D000017` (5), `4D000018` (8), `4D000019` (9), `4D00001A` (6), `4D00001B` (9), `4D00001C` (10), `4D00001D` (6), `4D00001E` (2), `4D00001F` (2), `4D000020` (2), `4D000021` (6), `4D000024` (3), `4D000025` (2), `4D000026` (1), `4D00002E` (4), `4D000036` (4), `4D000037` (2), `4D000038` (1), `4D00003C` (4), `4D00003D` (2), `4D00003E` (9).
+
+A single character's hash works as a team too: then all four of that team are that one.
+
+### Heroes
+`hero0` and `hero1` are one character each, and only Heroes uses them. What the game's own maps have:
+
+| Hero | Hash | Where |
+|------|------|-------|
+| Bond | `4D0001B9` | Facility, Archives, Underground, Annex |
+| Bond | `4D0001C5` | Railyard, Statue Park |
+| Bond | `4D0001CC` | Zukovsky's |
+| Bond | `4D0001EA` | Docks, Jungle |
+| Bond | `4D0001EC` | Sevproto |
+| Trevelyan | `4D0001BA` | Railyard, Statue Park, Underground, Jungle (the other team) |
+| Ourumov | `4D0002E7` | Facility, Archives, Sevproto, Annex (the other team) |
+| Zukovsky | `4D0002E8` | Zukovsky's, Docks (the other team) |
+
+There are six Bonds (the sixth is `4D000213`) and two Trevelyans (`4D0002EC`), a different outfit each; the name alone gives you the first one, `4D0001B9` and `4D0001BA`. For another, write the hash.
+
+Any character can be written there. Every one the game has a name for:
+
+| Name | Hash | | Name | Hash |
+|------|------|-|------|------|
+| Adams | `4D000200` | | Oddjob | `4D0001A6` |
+| Agent Zero | `4D000279` | | Onatopp | `4D0002E6` |
+| Agent Two | `4D00027A` | | Ourumov | `4D0002E7` |
+| Agent Four | `4D00027B` | | Pilot | `4D000216` |
+| Agent Six | `4D00027C` | | Pvt. Gurov | `4D0002AA` |
+| Alfonso | `4D0002B1` | | Pvt. Harkov | `4D0002AB` |
+| Baron Samedi | `4D00020D` | | Pvt. Kozmin | `4D0002AC` |
+| Blofeld | `4D0001AA` | | Pvt. Shkadov | `4D0002AD` |
+| Bond | `4D0001B9` and five more | | Red Grant | `4D000260` |
+| Boris | `4D0002B0` | | Red-one | `4D0001F9` |
+| Davis | `4D0001FE` | | Red-four | `4D0001FA` |
+| Dr. No | `4D00020C` | | Red-five | `4D0001FB` |
+| Five-One | `4D0002B2` | | Red-nine | `4D0001FC` |
+| Five-Two | `4D0002B3` | | Rosa Klebb | `4D00020E` |
+| Five-Three | `4D0002B4` | | Scaramanga | `4D0001AB` |
+| Five-Four | `4D0002B5` | | Security | `4D0002E9` |
+| HazMat | `4D0001D0` | | Sgt. Baikov | `4D0002A7` |
+| Jaws | `4D0001A7` | | Sgt. Chzov | `4D0002A8` |
+| Jones | `4D0001FD` | | Sgt. Drashev | `4D0002A9` |
+| Mishkin | `4D0002EA` | | Sgt. Glebov | `4D0002A6` |
+| Natalya | `4D0002EB` | | Sgt. Morozov | `4D0002A2` |
+| Sky Briggs | `4D0002ED` | | Sgt. Shubkin | `4D0002A5` |
+| Slav | `4D0002AF` | | Sgt. Udalov | `4D0002A4` |
+| Smyth | `4D0001FF` | | Sgt. Zotkin | `4D0002A3` |
+| Soldier | `4D0001D3` | | Trevelyan | `4D0001BA`, `4D0002EC` |
+| Two-Two | `4D0001E0` | | Vincent | `4D0002AE` |
+| Two-Four | `4D000280` | | Zukovsky | `4D0002E8` |
+| Two-Six | `4D000281` | | Two-Seven | `4D000282` |
+
+Only the eight in the first table are heroes in the game's own maps; anyone else as a hero is untried. The placeholder ones (`CAMO RUSSIAN1`, `CHAR #17`...) can be written by those names as well.
 
 Multiplayer spawn points get put on the floor below them. One that hangs over nothing gets a warning, and you want to listen to that one: the game checks every one of them when the level loads, single player too, and stops in an endless loop **on purpose** when one has no floor within a metre below it.
 
@@ -275,7 +411,7 @@ In the Maps tab, click a trigger and the **Entities** window lets you move it, t
 ![Screenshot of the trigger editor with a multiplayer spawn point selected](./usage-ge/editor.png)
 
 # Making a level without the terminal
-*New GoldenEye 007 map* in the menu bar does what `ge new-map` does and opens the result right away. Scene, folder, name, level number, a sky if you want one, done.
+*New GoldenEye 007 map* in the menu bar does what `ge new-map` does, gamemodes and all, and opens the geometry file right away. Scene, folder, name, level number, a sky if you want one, done.
 
 ![Screenshot of the new map dialog](./usage-ge/newmap.png)
 
@@ -295,6 +431,7 @@ In no particular order, all of these got me at least once:
 - **Names are prefixes.** `ladder_rungs` is a ladder. `skylight` is a sky. `collision_test_dont_use` is very much used.
 - **x is mirrored** in everything you type and everything the CLI prints.
 - **A multiplayer spawn point over nothing hangs the game** while loading. Read the warnings.
+- **The triggers aren't in the file with the level in it.** `mg_NAME.edb` has no triggers and the `mt_NAME.edb` files have nothing to look at, so in the viewer you edit a gamemode's triggers without the walls around them. Easier to move the empties in Blender and run `ge new-map` again.
 - **A `collision...` mesh turns off all other collision.** You wanted `collision_add...`.
 - **A room without a portal is invisible from outside.** That's not a bug, that's what a room is.
 - **The ladder quad faces the climber**, not the wall. The pink lines get drawn either way, so read the importer's warnings: a ladder that looks into its own wall can't be climbed.

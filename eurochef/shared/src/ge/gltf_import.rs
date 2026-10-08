@@ -14,6 +14,8 @@
 //! name starts with `spawn` or `player_start` is where the player starts. A node whose name
 //! starts with `mp_spawn` is a spawn point of a multiplayer game, looking along the node's own
 //! +z (Blender's -y); `mp_spawn_team0...` and `mp_spawn_team1...` are a team's. A node whose name
+//! starts with `golden_gun`, `goldeneye` or `black_box` is where that gamemode's gun, one of its
+//! consoles or its box is (see `project`: which gamemode gets what). A node whose name
 //! starts with `reference` or `ref_` is left out with everything below it. A node whose name
 //! starts with `sky` is the sky, with everything below it: drawn where it stands whichever room
 //! the camera is in, never collided with and not shaded by the importer's light.
@@ -37,7 +39,7 @@ use anyhow::Context;
 use image::RgbaImage;
 
 use super::{
-    geomap::{ladder_of, rim_edges, GeScene, ScenePortal, SceneSpawn, SceneTriangle, EDGE_CLIMB, EDGE_LADDER_TOP, EDGE_LONG_VAULT, EDGE_VAULT},
+    geomap::{ladder_of, rim_edges, GeScene, ModeItemKind, SceneModeItem, ScenePortal, SceneSpawn, SceneTriangle, EDGE_CLIMB, EDGE_LADDER_TOP, EDGE_LONG_VAULT, EDGE_VAULT},
     mesh::{GeVertex, COLOUR_ONE},
     texture::GeTexture,
 };
@@ -47,7 +49,8 @@ pub struct ImportOptions {
     /// Game units for a glTF unit (metres in both, so 1)
     pub scale: f32,
     /// Shade the vertex colours by a fixed light from above: the game draws levels with the
-    /// light in their vertex colours, and a scene without any looks flat
+    /// light in their vertex colours, and a scene without any looks flat. A mesh whose vertex
+    /// colours were painted has its light already and is left as it is
     pub bake_light: bool,
     /// Keep the vertex and material colours as the file has them. glTF's are linear and the game
     /// puts a colour's bytes on the screen as they are, so without this they are made sRGB
@@ -57,6 +60,9 @@ pub struct ImportOptions {
     /// material whose backface culling isn't turned on, so without this only a material's name
     /// (`twosided`, `nocull`) makes it two sided
     pub gltf_double_sided: bool,
+    /// Every vertex colour times this, the sky's too: 2 is twice as bright. A colour can't get
+    /// brighter than the game's brightest, about twice the level's texture as it is
+    pub brightness: f32,
 }
 
 impl Default for ImportOptions {
@@ -66,6 +72,7 @@ impl Default for ImportOptions {
             bake_light: true,
             linear_colours: false,
             gltf_double_sided: false,
+            brightness: 1.0,
         }
     }
 }
@@ -73,6 +80,8 @@ impl Default for ImportOptions {
 const LIGHT_DIRECTION: [f32; 3] = [0.35, 0.85, 0.4];
 const LIGHT_AMBIENT: f32 = 0.55;
 const LIGHT_DIFFUSE: f32 = 0.45;
+/// A vertex colour darker than this was painted
+const PAINTED_BELOW: f32 = 0.98;
 
 fn linear_to_srgb(c: f32) -> f32 {
     let c = c.clamp(0.0, 1.0);
@@ -113,6 +122,19 @@ fn team_of_name(name: &str) -> Option<u32> {
     let rest = name.strip_prefix("mp_spawn")?.trim_start_matches(['_', ' ', '-']).strip_prefix("team")?;
     let digits: String = rest.trim_start_matches(['_', ' ', '-']).chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
+}
+
+/// What a node named `golden_gun...`, `goldeneye...` or `black_box...` is: a gamemode's thing
+fn mode_item_of_name(name: &str) -> Option<ModeItemKind> {
+    if name.starts_with("golden_gun") || name.starts_with("goldengun") {
+        Some(ModeItemKind::GoldenGun)
+    } else if name.starts_with("goldeneye") {
+        Some(ModeItemKind::Console)
+    } else if name.starts_with("black_box") || name.starts_with("blackbox") {
+        Some(ModeItemKind::BlackBox)
+    } else {
+        None
+    }
 }
 
 /// What the edges of a mesh or node named `vault...`, `vault_long...`, `climb...` or `ladder...`
@@ -362,6 +384,14 @@ impl Importer<'_> {
             let p = transform_point(&matrix, [0.0, 0.0, 0.0]);
             let scale = self.options.scale;
             self.scene.spawn = Some([-p[0] * scale, p[1] * scale, p[2] * scale]);
+        } else if let Some(kind) = mode_item_of_name(&name) {
+            let p = transform_point(&matrix, [0.0, 0.0, 0.0]);
+            let scale = self.options.scale;
+            self.scene.mode_items.push(SceneModeItem {
+                kind,
+                name,
+                position: [-p[0] * scale, p[1] * scale, p[2] * scale],
+            });
         }
 
         if let Some(mesh) = node.mesh() {
@@ -442,6 +472,12 @@ impl Importer<'_> {
         });
         let uvs: Option<Vec<[f32; 2]>> = reader.read_tex_coords(0).map(|t| t.into_f32().collect());
         let colours: Option<Vec<[f32; 4]>> = reader.read_colors(0).map(|c| c.into_rgba_f32().collect());
+        // vertex colours that aren't all white are the level's light as it was painted: the
+        // importer's own on top of it would shade it twice
+        let painted = colours
+            .as_ref()
+            .map(|c| c.iter().any(|c| c[..3].iter().any(|v| *v < PAINTED_BELOW)))
+            .unwrap_or(false);
 
         let material = primitive.material();
         let factor = material.pbr_metallic_roughness().base_color_factor();
@@ -473,7 +509,7 @@ impl Importer<'_> {
                         *c = linear_to_srgb(*c);
                     }
                 }
-                if self.options.bake_light && !is_sky {
+                if self.options.bake_light && !is_sky && !painted {
                     let light = transform_direction(
                         &[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0; 4]],
                         LIGHT_DIRECTION,
@@ -483,6 +519,9 @@ impl Importer<'_> {
                     for c in colour.iter_mut().take(3) {
                         *c *= shade;
                     }
+                }
+                for c in colour.iter_mut().take(3) {
+                    *c *= self.options.brightness;
                 }
                 GeVertex {
                     pos: corners[k],

@@ -11,7 +11,10 @@
 
 use serde_json::{json, Map, Value};
 
-use super::triggers::{GeTrigger, TRIGGER_MULTIPLAYER_SPAWN, TRIGGER_SPAWN};
+use super::{
+    level::{TRIGGER_BLACK_BOX, TRIGGER_GOLDENEYE_CONSOLE, TRIGGER_GOLDEN_GUN},
+    triggers::{GeTrigger, TRIGGER_MULTIPLAYER_SPAWN, TRIGGER_SPAWN},
+};
 
 /// The rotation the game makes of a trigger's angles (around z, then x, then y), as a
 /// quaternion x, y, z, w
@@ -48,6 +51,10 @@ pub fn trigger_node_name(index: usize, trigger: &GeTrigger, type_name: Option<&s
             (Some(1), Some(team)) => format!("mp_spawn_team{team}_{index:03}"),
             _ => format!("mp_spawn_{index:03}"),
         },
+        // a gamemode's things, as the importer reads them: the consoles in the order of their numbers
+        TRIGGER_GOLDEN_GUN => format!("golden_gun_{index:03}"),
+        TRIGGER_BLACK_BOX => format!("black_box_{index:03}"),
+        TRIGGER_GOLDENEYE_CONSOLE => format!("goldeneye_{}_{index:03}", trigger.data[0].unwrap_or(0)),
         other => match type_name {
             Some(name) => format!("trigger_{index:03}_{}", name_part(name)),
             None => format!("trigger_{index:03}_0x{other:02X}"),

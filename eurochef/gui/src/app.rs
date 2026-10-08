@@ -98,6 +98,7 @@ struct NewMapDialog {
     id: u32,
     scale: f32,
     bake_light: bool,
+    brightness: f32,
     /// A made sky's preset. Empty: the scene's own sky, if it has one
     sky_preset: String,
     /// The made sky as it is set, a preset to begin with
@@ -118,6 +119,7 @@ impl Default for NewMapDialog {
             id: 1,
             scale: 1.0,
             bake_light: true,
+            brightness: 1.0,
             sky_preset: String::new(),
             sky: SkyOptions::preset("day").expect("the day preset"),
             sky_look: (0.0, 20.0),
@@ -433,6 +435,10 @@ impl EurochefApp {
                     ui.checkbox(&mut dialog.bake_light, "Shade the vertex colours from above");
                     ui.end_row();
 
+                    ui.label("Brightness");
+                    ui.add(egui::Slider::new(&mut dialog.brightness, 0.25..=4.0));
+                    ui.end_row();
+
                     ui.label("Sky");
                     egui::ComboBox::from_id_source("new_map_sky")
                         .selected_text(if dialog.sky_preset.is_empty() { "The scene's own" } else { dialog.sky_preset.as_str() })
@@ -483,19 +489,25 @@ impl EurochefApp {
                 import: ImportOptions {
                     scale: dialog.scale,
                     bake_light: dialog.bake_light,
+                    brightness: dialog.brightness,
                     ..Default::default()
                 },
                 sky: (!dialog.sky_preset.is_empty()).then(|| dialog.sky.clone()),
+                split: true,
             };
             let made = project::new_map_from_gltf(&dialog.gltf, &options).and_then(|mut map| {
-                let path = map.save(&dialog.folder)?;
-                Ok((path, map))
+                let saved = map.save(&dialog.folder)?;
+                Ok((saved, map))
             });
             match made {
-                Ok((path, map)) => {
+                Ok((saved, map)) => {
+                    // the level itself is only triggers: the file with the geometry is the one to look at
+                    let path = saved.iter().find(|f| f.mode.is_none() && f.hash != map.level_hash).unwrap_or(&saved[0]).path.clone();
                     dialog.status = format!(
-                        "Wrote {} (level {:08X}): {} triangles, {} collided with, {} textures, {} rooms, {} portals. Start the game with GE_LEVEL={:08X}.",
-                        path.display(),
+                        "Wrote {} and {} more file(s) to {} (level {:08X}): {} triangles, {} collided with, {} textures, {} rooms, {} portals. Start the game with GE_LEVEL={:08X}.",
+                        saved[0].path.file_name().unwrap_or_default().to_string_lossy(),
+                        saved.len() - 1,
+                        dialog.folder,
                         map.level_hash,
                         map.stats.drawn_triangles,
                         map.stats.collision_triangles,
@@ -504,6 +516,13 @@ impl EurochefApp {
                         map.stats.portals,
                         map.level_hash
                     );
+                    if !map.modes.is_empty() {
+                        let modes: Vec<&str> = map.modes.iter().map(|m| m.folder()).collect();
+                        dialog.status += &format!(" Gamemodes: {}.", modes.join(", "));
+                    }
+                    for (mode, why) in &map.left_out {
+                        dialog.status += &format!(" No {}: {why}.", mode.folder());
+                    }
                     for warning in &map.stats.warnings {
                         dialog.status += &format!(" Warning: {warning}.");
                     }
