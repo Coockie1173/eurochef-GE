@@ -103,7 +103,16 @@ impl MapViewerPanel {
         }
     }
 
+    /// For --camera: where the fly camera is and how it looks, and the trigger that is selected
+    pub fn set_view(&mut self, position: Vec3, pitch: f32, yaw: f32, selected: Option<usize>) {
+        self.frame.viewer.lock().camera_fly.set_view(position, pitch, yaw);
+        if selected.is_some() {
+            self.frame.selected_trigger = selected;
+        }
+    }
+
     pub fn set_source(&mut self, path: String, data: Arc<Vec<u8>>) {
+        self.frame.set_edges(&data);
         self.source = Some((path, data));
     }
 
@@ -157,7 +166,15 @@ impl MapViewerPanel {
 
     /// The window that moves, adds and removes triggers (the game's entities) and writes the
     /// file again
+    /// For --no-windows
+    pub fn hide_windows(&mut self) {
+        self.frame.hide_windows = true;
+    }
+
     fn show_editor(&mut self, ctx: &egui::Context) {
+        if self.frame.hide_windows {
+            return;
+        }
         let selected_map = self.frame.selected_map;
         let Some(map) = self.maps.get_mut(selected_map) else {
             return;

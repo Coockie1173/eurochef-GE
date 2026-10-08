@@ -75,6 +75,10 @@ pub struct EurochefApp {
 
     /// --screenshot: the file, the panel to show, frames left until it is taken
     screenshot: Option<(String, String, u32)>,
+    /// --camera and --select: the map view's camera (x, y, z, pitch, yaw) and its selected trigger
+    view: Option<([f32; 5], Option<usize>)>,
+    /// --no-windows
+    no_windows: bool,
 
     /// Where the pending file comes from, and the loaded file's path and bytes
     pending_path: String,
@@ -170,6 +174,8 @@ impl EurochefApp {
             game: String::new(),
             show_profiler: false,
             screenshot: None,
+            view: None,
+            no_windows: false,
             pending_path: String::new(),
             current_source: None,
             new_map: None,
@@ -314,6 +320,24 @@ impl EurochefApp {
         self.screenshot = Some((path, panel.to_lowercase(), after_frames.max(2)));
     }
 
+    pub fn view_request(&mut self, camera: [f32; 5], selected: Option<usize>) {
+        self.view = Some((camera, selected));
+    }
+
+    /// For pictures: the map view without the windows over it
+    pub fn no_windows_request(&mut self) {
+        self.no_windows = true;
+    }
+
+    /// For pictures: the new map dialog, filled in
+    pub fn new_map_request(&mut self, gltf: String) {
+        let mut dialog = NewMapDialog::default();
+        dialog.name = std::path::Path::new(&gltf).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        dialog.folder = "mods".to_string();
+        dialog.gltf = gltf;
+        self.new_map = Some(dialog);
+    }
+
     /// Counts down to the requested screenshot, saves it when it arrives and closes the window
     fn update_screenshot(&mut self, ctx: &egui::Context) {
         let Some((path, panel, frames_left)) = self.screenshot.as_mut() else {
@@ -332,6 +356,12 @@ impl EurochefApp {
             };
             if let Some(wanted) = wanted {
                 self.current_panel = wanted;
+            }
+            if let (true, Some(maps)) = (self.no_windows, self.maps.as_mut()) {
+                maps.hide_windows();
+            }
+            if let (Some((c, selected)), Some(maps)) = (self.view, self.maps.as_mut()) {
+                maps.set_view(glam::Vec3::new(c[0], c[1], c[2]), c[3], c[4], selected);
             }
         }
 

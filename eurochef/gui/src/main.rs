@@ -30,6 +30,23 @@ fn main() -> Result<()> {
         #[arg(long)]
         save_triggers: Option<String>,
 
+        /// Where the map view's camera is for --screenshot: x,y,z,pitch,yaw (degrees, pitch
+        /// down, yaw round from +z)
+        #[arg(long, allow_hyphen_values = true)]
+        camera: Option<String>,
+
+        /// For --screenshot: the map view without the windows over it
+        #[arg(long)]
+        no_windows: bool,
+
+        /// For --screenshot: the new map dialog, with this glTF file in it
+        #[arg(long)]
+        new_map_dialog: Option<String>,
+
+        /// The trigger that is selected for --screenshot
+        #[arg(long)]
+        select: Option<usize>,
+
         /// Frames to draw before the picture is taken
         #[arg(long, default_value_t = 90)]
         screenshot_after: u32,
@@ -60,6 +77,18 @@ fn main() -> Result<()> {
             let mut app = eurochef_gui::EurochefApp::new(args.file, args.hashcodes, cc);
             if let Some(path) = args.save_triggers {
                 app.save_triggers_request(path);
+            }
+            if let Some(camera) = &args.camera {
+                let v: Vec<f32> = camera.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                if let Ok(camera) = <[f32; 5]>::try_from(v) {
+                    app.view_request(camera, args.select);
+                }
+            }
+            if args.no_windows {
+                app.no_windows_request();
+            }
+            if let Some(gltf) = args.new_map_dialog {
+                app.new_map_request(gltf);
             }
             if let Some(path) = args.screenshot {
                 app.screenshot_request(path, &args.panel, args.screenshot_after);

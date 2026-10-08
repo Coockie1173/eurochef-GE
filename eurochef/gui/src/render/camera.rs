@@ -191,6 +191,14 @@ pub struct FpsCamera {
     pub speed_mul: f32,
 }
 
+impl FpsCamera {
+    /// Puts the camera somewhere, looking `pitch` degrees down and `yaw` degrees round from +z
+    pub fn set_view(&mut self, position: Vec3, pitch: f32, yaw: f32) {
+        self.position = position;
+        self.orientation = Vec2::new(pitch, yaw);
+    }
+}
+
 impl Default for FpsCamera {
     fn default() -> Self {
         Self {
