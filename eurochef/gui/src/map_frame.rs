@@ -62,6 +62,12 @@ pub struct MapFrame {
 
     vertex_lighting: bool,
     show_triggers: bool,
+    show_edges: bool,
+    /// For pictures of the view alone: the windows over it aren't drawn
+    pub(crate) hide_windows: bool,
+    /// What the level says can be vaulted over, climbed onto and climbed, as lines: start, end
+    /// and colour
+    edge_lines: Arc<Vec<(Vec3, Vec3, Vec3)>>,
     pickbuffer: PickBuffer,
 
     pub(crate) selected_map: usize,
@@ -190,6 +196,9 @@ impl MapFrame {
             textfield_focused: false,
             vertex_lighting: true,
             show_triggers: true,
+            show_edges: true,
+            hide_windows: false,
+            edge_lines: Default::default(),
             billboard_renderer: Arc::new(BillboardRenderer::new(&gl).unwrap()),
             link_renderer: Arc::new(LinkLineRenderer::new(&gl).unwrap()),
             select_renderer: Arc::new(SelectCubeRenderer::new(&gl).unwrap()),
@@ -224,6 +233,32 @@ impl MapFrame {
         }
 
         s
+    }
+
+    /// Reads the edges and ladders of a GoldenEye level file to draw them. Those of a zone's
+    /// own entity only: a placed mesh's are in its own space
+    pub fn set_edges(&mut self, data: &[u8]) {
+        use eurochef_shared::ge::{edges::read_edges, geomap};
+        let color = |flags: u16| match flags {
+            f if f & (geomap::EDGE_LADDER_TOP | geomap::POLYGON_RUNG) != 0 => Vec3::new(1.0, 0.25, 0.7),
+            f if f & geomap::EDGE_CLIMB != 0 => Vec3::new(1.0, 0.85, 0.1),
+            f if f & geomap::EDGE_LONG_VAULT != 0 => Vec3::new(0.1, 0.85, 0.8),
+            f if f & geomap::EDGE_VAULT != 0 => Vec3::new(0.2, 0.9, 0.2),
+            _ => Vec3::new(0.6, 0.6, 0.6),
+        };
+        let mut lines = vec![];
+        for set in read_edges(data).iter().filter(|s| s.zone) {
+            for edge in &set.edges {
+                lines.push((edge.from.into(), edge.to.into(), color(edge.flags)));
+            }
+            for polygon in &set.polygons {
+                for (i, corner) in polygon.corners.iter().enumerate() {
+                    let next = polygon.corners[(i + 1) % polygon.corners.len()];
+                    lines.push(((*corner).into(), next.into(), color(polygon.flags)));
+                }
+            }
+        }
+        self.edge_lines = Arc::new(lines);
     }
 
     fn reload_trigger_defs(&mut self) -> anyhow::Result<()> {
@@ -314,6 +349,10 @@ impl MapFrame {
             // }
 
             ui.checkbox(&mut self.show_triggers, "Show Triggers");
+            if !self.edge_lines.is_empty() {
+                ui.checkbox(&mut self.show_edges, "Show Edges")
+                    .on_hover_text("Green: vault, teal: long vault, yellow: climb, pink: ladders, grey: the rest");
+            }
 
             ui.add(
                 egui::DragValue::new(&mut self.trigger_scale)
@@ -452,6 +491,7 @@ impl MapFrame {
         let selected_trigger = self.selected_trigger;
         let select_renderer = self.select_renderer.clone();
         let show_triggers = self.show_triggers;
+        let edge_lines = if self.show_edges { self.edge_lines.clone() } else { Default::default() };
         let trigger_scale = self.trigger_scale;
         let hovered_link = self.selected_link;
         let trigger_info = self.trigger_info.clone();
@@ -662,6 +702,13 @@ impl MapFrame {
                 }
             }
 
+            if !edge_lines.is_empty() {
+                painter.gl().depth_mask(true);
+                for (start, end, color) in edge_lines.iter() {
+                    link_renderer.render(painter.gl(), &render_context, *start, *end, *color, 0.25);
+                }
+            }
+
             if show_triggers {
                 painter.gl().depth_mask(true);
                 if let Some(Some(trig)) = selected_trigger.map(|v| map.triggers.get(v)) {
@@ -795,6 +842,9 @@ impl MapFrame {
     }
 
     fn draw_trigger_inspector(&mut self, ctx: &egui::Context, map: &ProcessedMap) {
+        if self.hide_windows {
+            return;
+        }
         let screen_space = ctx.screen_rect();
         egui::Window::new("Inspector")
             .scroll([false, true])

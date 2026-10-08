@@ -4,7 +4,8 @@
 use anyhow::Context;
 use clap::Subcommand;
 use eurochef_shared::ge::{
-    geomap::build_geometry_file,
+    edges::{edge_name, read_edges},
+    geomap::{build_geometry_file, POLYGON_RUNG},
     gltf_import::{import_gltf, ImportOptions},
     level::geometry_hash,
     project::{new_map_from_gltf, NewMapOptions},
