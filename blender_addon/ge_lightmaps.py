@@ -12,7 +12,9 @@ Script (that lasts until Blender is closed).
 
 import math
 import os
+import re
 
+import bmesh
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper
@@ -85,6 +87,22 @@ class Settings(bpy.types.PropertyGroup):
         description="The baked light times this. The game can only darken by a lightmap: what is white leaves the level as it is",
         default=1.0, min=0.1, max=16.0,
     )
+    split: BoolProperty(
+        name="Split Large Meshes",
+        description="Cut a mesh that is too large for one lightmap into several objects, each with a lightmap of its own. "
+        "The pieces are named NAME_lm2, NAME_lm3...: a room's pieces stay that room",
+        default=False,
+    )
+    density: FloatProperty(
+        name="Texels per Metre",
+        description="The least a lightmap is to have of a split mesh: more of them, more and smaller pieces",
+        default=8.0, min=0.5, max=256.0,
+    )
+    denoise: BoolProperty(
+        name="Denoise",
+        description="Smooth the bake's grain. Grain is different on every face, so it shows where two faces meet",
+        default=True,
+    )
     hide_sky: BoolProperty(
         name="Bake Without the Sky",
         description="Leave the sky's mesh out of the bake: around the whole level, it keeps the sun and the world's light out",
@@ -114,7 +132,7 @@ def unwrap(context, obj, settings):
             PREF_PACK_IN_ONE=False,
             PREF_NEW_UVLAYER=False,
             PREF_BOX_DIV=12,
-            PREF_MARGIN_DIV=max(settings.island_margin * 10.0, 0.01),
+            PREF_MARGIN_DIV=min(1.0, max(0.1, settings.island_margin * 30.0)),
         )
     else:
         # stretched to the image's sides: a long room would only use a band of it
@@ -134,6 +152,94 @@ def expose(image, factor):
             pixels[i] = min(pixels[i] * factor, 1.0)
     image.pixels.foreach_set(pixels)
     image.update()
+
+
+# how much of a lightmap its triangles get to use, the rest is the room between the islands
+FILL = 0.6
+MAX_PIECES = 32
+
+
+def world_area(obj):
+    scale = obj.matrix_world.to_scale()
+    return sum(p.area for p in obj.data.polygons) * abs(scale.x * scale.y * scale.z) ** (2.0 / 3.0)
+
+
+def pieces_wanted(obj, size, density):
+    """How many lightmaps of this size the mesh needs to get its texels per metre"""
+    holds = size * size * FILL / (density * density)
+    return max(1, min(MAX_PIECES, math.ceil(world_area(obj) / holds - 1e-6)))
+
+
+def piece_name(name, number):
+    return "{}_lm{}".format(re.sub(r"\.\d+$", "", name), number)
+
+
+def keep_faces(mesh, keep):
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.faces.ensure_lookup_table()
+    gone = [f for f in bm.faces if f.index not in keep]
+    bmesh.ops.delete(bm, geom=gone, context='FACES')
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+
+
+def halve(obj, share):
+    """Cuts the mesh in two across its longest side, `share` of its area staying in it. Returns
+    the object the rest went to, None when there is nothing to cut"""
+    mesh = obj.data
+    if len(mesh.polygons) < 2:
+        return None
+    centres = [obj.matrix_world @ p.center for p in mesh.polygons]
+    spans = [max(c[k] for c in centres) - min(c[k] for c in centres) for k in range(3)]
+    axis = spans.index(max(spans))
+    order = sorted(range(len(centres)), key=lambda i: centres[i][axis])
+    total = sum(p.area for p in mesh.polygons)
+    stays, area = set(), 0.0
+    for i in order[:-1]:
+        stays.add(i)
+        area += mesh.polygons[i].area
+        if area >= total * share:
+            break
+
+    other = obj.copy()
+    other.data = mesh.copy()
+    for collection in obj.users_collection:
+        collection.objects.link(other)
+    keep_faces(mesh, stays)
+    keep_faces(other.data, set(range(len(centres))) - stays)
+    return other
+
+
+def split(obj, pieces):
+    """The mesh as this many objects of about the same area, each a box of its own"""
+    if pieces <= 1:
+        return [obj]
+    first = pieces // 2
+    other = halve(obj, first / pieces)
+    if other is None:
+        return [obj]
+    return split(obj, first) + split(other, pieces - first)
+
+
+def split_for_lightmaps(obj, size, density):
+    """Cuts the object up when one lightmap isn't enough for it. Its lightmap, if it had one, is
+    of the whole and goes; the pieces are unwrapped anew"""
+    pieces = pieces_wanted(obj, size, density)
+    if pieces <= 1:
+        return [obj]
+    name = obj.name
+    parts = split(obj, pieces)
+    for number, part in enumerate(parts, 1):
+        if part is not obj:
+            part.name = piece_name(name, number)
+            part.data.name = part.name
+        part.ge_lightmap = None
+        layer = part.data.uv_layers.get(UV_NAME)
+        if layer is not None:
+            part.data.uv_layers.remove(layer)
+    return parts
 
 
 def is_black(image):
@@ -219,6 +325,8 @@ class BakeLightmaps(bpy.types.Operator):
         scene.render.engine = 'CYCLES'
         was_samples = scene.cycles.samples
         scene.cycles.samples = settings.samples
+        was_denoising = scene.cycles.use_denoising
+        scene.cycles.use_denoising = settings.denoise
         placeholder = bpy.data.materials.new("GE Lightmap Placeholder")
         if placeholder.node_tree is None:
             placeholder.use_nodes = True
@@ -226,6 +334,14 @@ class BakeLightmaps(bpy.types.Operator):
         hidden = hide_helpers(scene, settings.hide_sky)
 
         size = int(settings.size)
+        if settings.split:
+            whole = targets
+            targets = []
+            for obj in whole:
+                targets.extend(split_for_lightmaps(obj, size, settings.density))
+            was_selected = was_selected + [o for o in targets if o not in was_selected]
+            if len(targets) > len(whole):
+                self.report({'INFO'}, "{} mesh(es) cut into {}".format(len(whole), len(targets)))
         baked = 0
         failed = []
         context.window_manager.progress_begin(0, len(targets))
@@ -278,6 +394,7 @@ class BakeLightmaps(bpy.types.Operator):
                 obj.hide_render = False
             bpy.data.materials.remove(placeholder)
             scene.cycles.samples = was_samples
+            scene.cycles.use_denoising = was_denoising
             scene.render.engine = was_engine
             bpy.ops.object.select_all(action='DESELECT')
             for obj in was_selected:
@@ -422,12 +539,17 @@ class LightmapPanel(bpy.types.Panel):
         column = layout.column(align=True)
         column.prop(settings, "size")
         column.prop(settings, "samples")
+        column.prop(settings, "denoise")
         column.prop(settings, "margin")
         column.prop(settings, "exposure")
         column.prop(settings, "unwrap")
         column.prop(settings, "island_margin")
         column.prop(settings, "unwrap_again")
         column.prop(settings, "hide_sky")
+        column.prop(settings, "split")
+        row = column.row()
+        row.enabled = settings.split
+        row.prop(settings, "density")
 
         meshes = [o for o in context.selected_objects if o.type == 'MESH']
         with_lightmap = sum(1 for o in meshes if has_lightmap(o))
