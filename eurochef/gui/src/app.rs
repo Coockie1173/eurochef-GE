@@ -99,6 +99,10 @@ struct NewMapDialog {
     scale: f32,
     bake_light: bool,
     brightness: f32,
+    /// How many smaller copies a lightmap's texture gets, 0: none
+    lightmap_mips: u32,
+    /// Lightmaps as RGBA8, not compressed
+    lightmap_uncompressed: bool,
     /// A made sky's preset. Empty: the scene's own sky, if it has one
     sky_preset: String,
     /// The made sky as it is set, a preset to begin with
@@ -120,6 +124,8 @@ impl Default for NewMapDialog {
             scale: 1.0,
             bake_light: true,
             brightness: 1.0,
+            lightmap_mips: 2,
+            lightmap_uncompressed: false,
             sky_preset: String::new(),
             sky: SkyOptions::preset("day").expect("the day preset"),
             sky_look: (0.0, 20.0),
@@ -439,6 +445,16 @@ impl EurochefApp {
                     ui.add(egui::Slider::new(&mut dialog.brightness, 0.25..=4.0));
                     ui.end_row();
 
+                    ui.label("Lightmaps");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut dialog.lightmap_mips).range(0..=10))
+                            .on_hover_text("How many smaller copies (mip levels) a lightmap's texture gets. 0: none, no dark lines along edges far away. The game's own have 2");
+                        ui.label("mip levels");
+                        ui.checkbox(&mut dialog.lightmap_uncompressed, "Uncompressed")
+                            .on_hover_text("RGBA8 in place of CMPR: no blocks in soft light, eight times the size");
+                    });
+                    ui.end_row();
+
                     ui.label("Sky");
                     egui::ComboBox::from_id_source("new_map_sky")
                         .selected_text(if dialog.sky_preset.is_empty() { "The scene's own" } else { dialog.sky_preset.as_str() })
@@ -490,6 +506,8 @@ impl EurochefApp {
                     scale: dialog.scale,
                     bake_light: dialog.bake_light,
                     brightness: dialog.brightness,
+                    lightmap_mips: dialog.lightmap_mips,
+                    lightmap_uncompressed: dialog.lightmap_uncompressed,
                     ..Default::default()
                 },
                 sky: (!dialog.sky_preset.is_empty()).then(|| dialog.sky.clone()),

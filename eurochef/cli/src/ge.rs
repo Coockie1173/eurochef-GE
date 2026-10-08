@@ -158,6 +158,15 @@ pub enum GeCommand {
         #[arg(long, default_value_t = 1.0)]
         brightness: f32,
 
+        /// How many smaller copies (mip levels) a lightmap's texture gets, 0: none. The game's
+        /// own have 2
+        #[arg(long, default_value_t = 2)]
+        lightmap_mips: u32,
+
+        /// Don't compress the lightmaps' textures: no blocks in soft light, eight times the size
+        #[arg(long)]
+        lightmap_uncompressed: bool,
+
         /// Draw from both sides what the glTF materials say is double sided (Blender: every
         /// material without Backface Culling). Without it only materials named ...twosided or
         /// ...nocull are
@@ -214,6 +223,13 @@ pub enum GeCommand {
 
         #[arg(long, default_value_t = 1.0)]
         brightness: f32,
+
+        #[arg(long, default_value_t = 2)]
+        lightmap_mips: u32,
+
+        /// Don't compress the lightmaps' textures: no blocks in soft light, eight times the size
+        #[arg(long)]
+        lightmap_uncompressed: bool,
 
         #[arg(long)]
         gltf_double_sided: bool,
@@ -368,6 +384,8 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             no_light,
             linear_colours,
             brightness,
+            lightmap_mips,
+            lightmap_uncompressed,
             gltf_double_sided,
             one_file,
             team0,
@@ -386,6 +404,8 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     linear_colours,
                     gltf_double_sided,
                     brightness,
+                    lightmap_mips,
+                    lightmap_uncompressed,
                 },
                 sky: sky.options(false)?,
                 split: !one_file,
@@ -462,6 +482,8 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             no_light,
             linear_colours,
             brightness,
+            lightmap_mips,
+            lightmap_uncompressed,
             gltf_double_sided,
         } => {
             let scene = import_gltf(
@@ -472,6 +494,8 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     linear_colours,
                     gltf_double_sided,
                     brightness,
+                    lightmap_mips,
+                    lightmap_uncompressed,
                 },
             )?;
             let time = std::time::SystemTime::now()

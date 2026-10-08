@@ -68,6 +68,13 @@ pub struct ImportOptions {
     /// Every vertex colour times this, the sky's too: 2 is twice as bright. A colour can't get
     /// brighter than the game's brightest, about twice the level's texture as it is
     pub brightness: f32,
+    /// How many smaller copies a lightmap's texture gets, 0: none. The game draws what is far
+    /// away with the smaller ones, in which a lightmap's parts run into each other and into the
+    /// black between them
+    pub lightmap_mips: u32,
+    /// Keep a lightmap's texture as it is (RGBA8, eight times the size) in place of CMPR, whose
+    /// 4 by 4 blocks of two colours show in soft light and where two faces meet in a block
+    pub lightmap_uncompressed: bool,
 }
 
 impl Default for ImportOptions {
@@ -78,6 +85,8 @@ impl Default for ImportOptions {
             linear_colours: false,
             gltf_double_sided: false,
             brightness: 1.0,
+            lightmap_mips: 2,
+            lightmap_uncompressed: false,
         }
     }
 }
@@ -183,6 +192,61 @@ struct LightmapTriangle {
     texture: usize,
     corners: [(Place, [f32; 2]); 3],
     used: bool,
+}
+
+/// Gives every texel of a lightmap that no triangle uses the colour of the nearest one that is
+/// used. The game reads a lightmap between its texels, in 4 by 4 blocks (CMPR) and in smaller
+/// copies of itself: all three reach past a triangle's edge, into what was baked for nothing
+/// (black) or for another face. `triangles` are the lightmap's own, in texture coordinates
+fn spread_lightmap(image: &mut RgbaImage, triangles: &[[[f32; 2]; 3]]) {
+    let (width, height) = (image.width() as i32, image.height() as i32);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut used = vec![false; (width * height) as usize];
+    for t in triangles {
+        let p = t.map(|uv| [uv[0] * width as f32, uv[1] * height as f32]);
+        let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+        if !area.is_finite() || area.abs() < 1e-6 {
+            continue;
+        }
+        let low = |k: usize| p.iter().map(|c| c[k]).fold(f32::MAX, f32::min).floor() as i32;
+        let high = |k: usize| p.iter().map(|c| c[k]).fold(f32::MIN, f32::max).ceil() as i32;
+        for y in low(1)..=high(1) {
+            for x in low(0)..=high(0) {
+                // a texel is a triangle's when its middle is in it
+                let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
+                let side = |a: [f32; 2], b: [f32; 2]| (b[0] - a[0]) * (cy - a[1]) - (b[1] - a[1]) * (cx - a[0]);
+                let w = [side(p[0], p[1]) / area, side(p[1], p[2]) / area, side(p[2], p[0]) / area];
+                if w.iter().all(|v| *v >= -0.01) {
+                    used[(y.rem_euclid(height) * width + x.rem_euclid(width)) as usize] = true;
+                }
+            }
+        }
+    }
+    if !used.iter().any(|u| *u) {
+        return;
+    }
+    // outwards from the used texels, a ring at a time
+    let mut ring: Vec<(i32, i32)> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|(x, y)| used[(y * width + x) as usize])
+        .collect();
+    while !ring.is_empty() {
+        let mut next = vec![];
+        for (x, y) in ring {
+            let colour = *image.get_pixel(x as u32, y as u32);
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if nx < 0 || ny < 0 || nx >= width || ny >= height || used[(ny * width + nx) as usize] {
+                    continue;
+                }
+                used[(ny * width + nx) as usize] = true;
+                image.put_pixel(nx as u32, ny as u32, colour);
+                next.push((nx, ny));
+            }
+        }
+        ring = next;
+    }
 }
 
 fn is_sky_name(name: Option<&str>) -> bool {
@@ -353,6 +417,7 @@ impl Importer<'_> {
                 name,
                 image: rgba,
                 full_alpha: false,
+                mip_levels: None,
             });
             let index = self.scene.textures.len() - 1;
             self.image_textures[image] = Some(index);
@@ -391,6 +456,8 @@ impl Importer<'_> {
                     continue;
                 }
                 let texture = self.texture_for(&material)?;
+                self.scene.textures[texture].mip_levels = Some(self.options.lightmap_mips);
+                self.scene.textures[texture].full_alpha = self.options.lightmap_uncompressed;
                 let buffers = self.buffers;
                 let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
                 let (Some(positions), Some(uvs)) = (reader.read_positions(), reader.read_tex_coords(0)) else {
@@ -709,6 +776,13 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         for node in scene.nodes() {
             importer.node(&node, &identity, Inherited::default())?;
         }
+    }
+    let mut by_texture: HashMap<usize, Vec<[[f32; 2]; 3]>> = HashMap::new();
+    for t in importer.lightmaps.values().flatten() {
+        by_texture.entry(t.texture).or_default().push(t.corners.map(|c| c.1));
+    }
+    for (texture, triangles) in &by_texture {
+        spread_lightmap(&mut importer.scene.textures[*texture].image, triangles);
     }
     let unused = importer.lightmaps.values().flatten().filter(|t| !t.used).count();
     if importer.lightmapped > 0 || unused > 0 {

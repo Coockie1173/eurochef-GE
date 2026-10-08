@@ -21,6 +21,9 @@ pub struct GeTexture {
     pub image: RgbaImage,
     /// Keep every bit of the alpha channel (RGBA8, four times the size of CMPR)
     pub full_alpha: bool,
+    /// How many smaller copies of itself it gets at the most, None: all of them. The game's own
+    /// lightmaps have two: further down the parts of a lightmap run into each other
+    pub mip_levels: Option<u32>,
 }
 
 impl GeTexture {
@@ -29,6 +32,7 @@ impl GeTexture {
             name: name.to_string(),
             image: RgbaImage::from_pixel(16, 16, rgba.into()),
             full_alpha: false,
+            mip_levels: None,
         }
     }
 
@@ -53,7 +57,7 @@ pub fn write_texture(w: &mut Writer, texture: &GeTexture) {
     };
 
     // down to 1 pixel on the longer side, as the game's own textures
-    let max_lod = width.max(height).trailing_zeros();
+    let max_lod = width.max(height).trailing_zeros().min(texture.mip_levels.unwrap_or(u32::MAX));
     let mut levels = vec![base];
     for level in 1..=max_lod {
         let (lw, lh) = ((width >> level).max(1), (height >> level).max(1));
