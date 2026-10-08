@@ -1,11 +1,8 @@
 name: Github Pages
 
+# turned off: only runs when started by hand from the Actions tab
 on:
-  push:
-    branches: ["main"]
-    paths-ignore:
-      - "**/.md"
-      - "blender_addon"
+  workflow_dispatch:
 
 permissions:
   contents: write # for committing to gh-pages branch.
