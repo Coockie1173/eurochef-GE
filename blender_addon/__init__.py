@@ -1,19 +1,19 @@
-from . import ecm
+from . import ge_lightmaps
 
 bl_info = {
     "name": "Eurochef Utility",
     "author": "cohaereo",
-    "description": "Utility to work with Eurochef files",
-    "blender": (2, 80, 0),
-    "version": (0, 0, 1),
-    "location": "File -> Import",
+    "description": "Lightmaps for GoldenEye 007 (Wii) levels: bake them and export the level",
+    "blender": (4, 2, 0),
+    "version": (0, 1, 0),
+    "location": "3D View > Sidebar > GoldenEye",
     "category": "Import-Export"
 }
 
 
 def register():
-    ecm.register()
+    ge_lightmaps.register()
 
 
 def unregister():
-    ecm.unregister()
+    ge_lightmaps.unregister()
