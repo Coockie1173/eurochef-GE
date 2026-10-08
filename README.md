@@ -14,7 +14,7 @@ Eurochef provides tools and Rust crates for working with Eurocom EngineX(T) file
   * [x] Blender plugin
 * [x] Filelist re-packer
 * [x] GUI viewer tool (WIP)
-* [x] GoldenEye 007 (Wii): new levels from glTF scenes (geometry, textures, collision), triggers moved, added and removed, see [docs/goldeneye_wii.md](docs/goldeneye_wii.md)
+* [x] GoldenEye 007 (Wii): new levels from glTF scenes (geometry, textures, collision), triggers moved, added and removed, vaults and ladders, see [docs/USAGE-GE.md](docs/USAGE-GE.md) (how to use it) and [docs/goldeneye_wii.md](docs/goldeneye_wii.md) (the format)
 * [ ] Filelist VFS
 * [ ] Intermediate representation of EDB files
 * [ ] EDB to Euroland 4 decompiler

@@ -19,3 +19,5 @@ xroot/
 *.log
 # the one model that is kept
 !player_size_reference.gltf
+# the docs' example scene
+!docs/usage-ge/example.gltf

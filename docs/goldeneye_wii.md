@@ -4,25 +4,43 @@ EDB version 263, big endian, GX meshes and textures. The game's folder is `bondx
 come out of `Filelist.bin` with `eurochef-cli filelist extract`.
 
 Everything below was checked in the running game (a static recompilation that loads loose
-`.edb` files), not only against the reader.
+`.edb` files), not only against the reader. How to use it all, with pictures:
+[USAGE-GE.md](USAGE-GE.md).
 
 ## What the tools do
 
 ```
 eurochef-cli ge new-map scene.glb --name yard --id 1 -o mods/
 eurochef-cli ge triggers mt_test.edb
+eurochef-cli ge export-triggers mt_test.edb -o mt_test_triggers.gltf
 eurochef-cli ge edit-triggers mt_test.edb -o out.edb --move 15:-12,0.05,12 --copy 0:1,0,2 --remove 20
+eurochef-cli ge edges mt_yard.edb
 ```
 
 - `ge new-map` makes one level file (`mt_NAME.edb`, hash `0181 0200 + id`) from a glTF scene:
-  triangles, textures (CMPR, with mip levels), collision, rooms and portals and the player's
-  spawn point. When
+  triangles, textures (CMPR, with mip levels), collision, rooms and portals, what the player
+  vaults over, ladders and the player's spawn point. When
   another file in the output folder has that hash already, the level gets the next free one.
 - `ge triggers` lists the triggers of a file's map, `ge edit-triggers` moves, turns, copies,
   adds and removes them and writes the file again.
+- `ge export-triggers` writes the triggers as a glTF scene of empty nodes, one for each, named
+  the way `ge new-map` reads them: `spawn` (0x1C), `mp_spawn_NNN` and `mp_spawn_teamT_NNN`
+  (0x35), and `trigger_NNN_TYPE` for all the others (NNN the trigger's index, TYPE its name in
+  the trigger definitions or the type in hex), which `ge new-map` leaves alone. x is negated as
+  on import, a node's extras have the trigger's type, flags and values.
+- `ge new-map --sky PRESET` puts a made sky around the level in place of the scene's own: a sphere
+  seen from inside with the sky in its vertex colours (zenith, horizon, ground, clouds; `day`,
+  `overcast`, `dusk`, `night`, `space`), or with a panorama on it (`--sky-texture`). Its middle
+  and size are the level's. `ge sky --preview PICTURE.png` draws what a player sees of one,
+  `ge sky --list` lists the presets.
+- `ge edges` lists what a level file says can be vaulted over, climbed onto and climbed: every
+  edge with its flags, every ladder with its foot, its top and its number of pieces.
 - The viewer: *New GoldenEye 007 map* in the menu bar does what `ge new-map` does and opens the
   result. In the Maps tab the *Entities* window moves the selected trigger, changes its values,
-  duplicates and deletes it, adds new ones at the camera and saves the file.
+  duplicates and deletes it, adds new ones at the camera and saves the file. *Export triggers as
+  glTF...* there does what `ge export-triggers` does, with the triggers as they are in the window.
+  *Show Edges* draws the edges and ladders of the zones' entities over the level: green a vault,
+  teal a long one, yellow a climb, pink a ladder, grey the rest.
 
 ### The glTF scene
 
@@ -57,6 +75,23 @@ eurochef-cli ge edit-triggers mt_test.edb -o out.edb --move 15:-12,0.05,12 --cop
   whole level, its faces turned inwards. The game draws it where it stands (it doesn't follow
   the camera) and it hides what is behind it like any wall, so it has to be larger than the
   level. Nothing collides with it, it is in no room and the light from above doesn't shade it.
+- A mesh or node named `vault...`, `vault_long...` or `climb...` isn't drawn or collided with: it
+  marks what the player gets over with the action button. It stands for an obstacle's top, a
+  quad (or a box) that ends where the top does, and the rim of its faces that look up become the
+  game's edges, each taken from outside, a wall's short ends too. `vault` goes over and ends
+  about 1.25 m behind the edge, `vault_long` about 1.6 m, `climb` gets up onto the top. The way
+  is always that long: a `vault` over a wall 0.4 m thick lands behind it, over one 1.3 m thick
+  it ends on top. The top has to be 0.5 to 1.5 m above the floor in front of it (the game's own
+  are 1.1), the importer warns about one that isn't. See "Vault, climb and ladder edges" below.
+- A mesh or node named `ladder...` isn't drawn or collided with: it is a ladder. A flat upright
+  quad that looks at the player on it (its front is the side the player climbs), as wide as the
+  ladder (the game's are 0.4 to 0.5) and from the floor up to where the player gets off, the
+  top of the platform. It may lean. The importer cuts it into pieces half a metre tall and lets
+  the lowest end 0.5 above the floor in front of it, as the game's own do: with pieces down to
+  the floor the player who climbs down never gets off. It warns about one without floor in
+  front of it, one that starts more than 0.75 above the floor (it is only got onto from its
+  top) and leaves out one that is less than a metre tall. The drawn ladder is another mesh, and
+  mustn't be named `ladder...`.
 - Textures are resized to powers of two between 8 and 1024. Alpha is kept as CMPR's one bit.
 
 ### Rooms and portals
@@ -197,6 +232,89 @@ player spawns. Levels made here are one file.
 `ge edit-triggers` writes the new triggers behind the end of the file and points the map at
 them, so it only works on files that are loaded as a whole (all of the game's `mt_` level
 files but `mt_archive*`).
+
+### Vault, climb and ladder edges (variant 6)
+
+What a player can vault over or climb onto isn't in the collision and isn't a trigger: it is a
+list of edges, variant 6 of an entity of the level's `mt_` file (the zone's 0x608 in Dam, the
+tutorial and the archives, a 0x601 mesh in the facility and Zukovsky's). `mg_` files have none.
+The variant word at +0x40 is as for the collision's (`offset << 8 | 6` in the table, bit 6 in the
+low byte) and points at a 0x20 byte header:
+
+| Offset | |
+| --- | --- |
+| 0x00 | the number of chains, a relative pointer to them |
+| 0x08 | the number of polygons, a relative pointer to them |
+| 0x10 | the number of 16 byte records in the chains (short), in the polygons (short) |
+
+A chain is a line of points, `n + 1` records of 16 bytes for `n` edges: the first has `n` in its
+first byte, each has its point as three floats at +4. Edge `k` runs from point `k` to point
+`k + 1` and its values are in record `k + 1`: a byte at +1 (1: nothing joins its start, 2: its
+end, 3: an edge on its own) and its flags, a short at +2. A polygon is a record with the number
+of corners (byte), a bit for each open side (byte: bit 0 is the side from the first corner to
+the second, and so on round), flags (short) and a vector, then a record for each corner: the
+point as three floats at +0 and two shorts (0 or 0x3F, 0x7F: which corner of the piece it is).
+The polygons come before the chains.
+
+#### Ladders
+
+A ladder is polygons with flags 0x1000 and one edge with flags 0x100 (Carrier has three,
+`mpg_frigate`, `mpg_sevproto` and the toolbox's props more, 0.4 to 0.45 wide):
+
+- the polygons are a column of quads half a unit tall, one above the other, from 0.5 above the
+  floor up to the top. `(c1 - c0) x (c2 - c0)` of a quad's corners looks at the player on the
+  ladder, the game takes a ladder only from that side (`fn_8011A190`: a point behind the player
+  has to be in front of the quad's plane). The vector in the first record is not the normal: it
+  is the way the top's edge runs, level. The open sides are the two upright ones and the lowest
+  quad's bottom (0x05 and 0x0D with the corners in Carrier's order: bottom and top of one side,
+  top and bottom of the other);
+- the edge is the upper end of the top quad and runs as a vault's does: the player gets off
+  towards `(dz, 0, -dx)`, onto what the ladder leads to.
+
+Played on made levels (a platform 3 and 6.2 high, the ladder on its face):
+
+| | |
+| --- | --- |
+| walking into its foot | state 0x16, then 0x1D, 0x1F and 0x1E up, 0x17 off at the top: the player stands on the platform |
+| backing off the top (in the air beside it, more than 0.5 above the floor: `fn_8010E780` finds the 0x100 edge within 0.6) | state 0x18, 0x1D, 0x21 and 0x20 down, 0x1A and 0x19 off at the foot |
+| the foot 0.4 or 0.5 above the floor | both as above |
+| the foot on the floor | up as above; down the player stays in state 0x1A for good |
+| the foot 0.25, 0.75 or 1.0 above the floor | down: the player drops off the end (state 4), no harm |
+| the foot 1.0 or 1.5 above the floor | walking into it does nothing: only got onto from the top |
+
+In a level with rooms the ladder was taken with its polygons and edge on the entity of the
+zone it stands in. `ge new-map` gives a ladder to the zones 0.5 in front of its foot, its
+middle and its top and to the one behind its top.
+
+The player's search (`fn_80111010`) asks the entities near for their edges (`fn_80313CD0` >
+`fn_802E3280` for variant 6 > `fn_802EE810`) and takes one when
+
+- its flags have 0x01, 0x02, 0x10 or 0x80: 0x01 and 0x02 are taken within 45 degrees of the way
+  the player faces, 0x10 and 0x80 within 60. 0x100 is a ladder's top, looked for elsewhere
+  (`fn_8010E780`), 0x40 with a polygon of flags 0x20 is another thing to climb (Monaco, the
+  statue park), not made here; 0x04 is on most of the game's edges and the player's search doesn't ask for it;
+- the middle of its two ends is 0.5 to 1.5 above the player (the tutorial's are all 1.1 above
+  the floor);
+- it runs the right way: the player goes over it towards `(dz, 0, -dx)` of its direction, so an
+  obstacle has an edge on each side it is taken from, and the two run opposite ways. The
+  tutorial's block: `(-2, 1.1, 11.25) > (2, 1.1, 11.25)` and `(2, 1.1, 9.93) > (-2, 1.1, 9.93)`,
+  flags 2.
+
+Then the button (b with the stick forward, "Climb") starts state 8, `fn_80112550`. Played on
+made levels, a wall 1.1 high with the player 0.5 in front of the edge:
+
+| Flags | |
+| --- | --- |
+| 0x01 | a vault: the player ends 1.27 behind the edge, on the floor behind a wall 0.4 thick, on top of one 1.3 thick |
+| 0x02 | a longer one: 1.66 behind the edge and a little to the side; off the far end of a wall 1.3 thick |
+| 0x10 | a climb: up onto the top, 0.25 behind the edge |
+
+The way is the same whatever is there: an obstacle has to be as thick as the flags fit. 0x80
+wasn't played.
+
+Only the entity of the zone the player is in is asked: edges on the first zone's entity did
+nothing for a player in the second. `ge new-map` gives an edge to the zone 0.5 in front of it
+and to the one 0.5 behind it.
 
 ### Textures
 
