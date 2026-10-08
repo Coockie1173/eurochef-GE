@@ -171,7 +171,9 @@ mesh, with the mesh's triangles once more (in Bunker's lightmapped rooms all of 
 72 + 312 + 110 + 40), a texture of its own (128 x 128) and texture coordinates between 0 and 1.
 Its vertex colours are 0x7F like the rest of such a mesh. The game's have no triangle flags for
 it (the array ends with the strips before it) and are collided with as their variant; the ones
-made here have flags, all "not collided with". Railyard has 484 meshes with a strip of blend
+made here have flags, all "not collided with". Its texture has fewer mip levels than the
+others: 2 (the header's +0x12 and the TPL's max lod) where a 128 x 128 texture otherwise has 7;
+`--lightmap-mips` says how many, and 0 is drawn as well. Railyard has 484 meshes with a strip of blend
 3, the tank chase 398, Archives 275, Bunker 163, Dam 8, the test level none.
 
 The word at +0x40 has a bit for each "variant" in its low byte and the offset from +0x40 to

@@ -66,6 +66,8 @@ Read that output, by the way. If it says `0 ladders` and you made a ladder, you 
 | `--no-light` | Don't shade the vertex colours by a light from above |
 | `--brightness N` | Every vertex colour times N. 1.5 is half again as bright, the game stops at about 2 for a white vertex |
 | `--linear-colours` | Keep the colours as glTF has them (darker) |
+| `--lightmap-mips N` | How many smaller copies (mip levels) a lightmap's texture gets, 0 for none. 2 like the game's own (see Lightmaps) |
+| `--lightmap-uncompressed` | Lightmaps as RGBA8 in place of CMPR: no blocks in soft light, eight times the size |
 | `--gltf-double-sided` | Believe glTF's "double sided" flag (see Colours and sides) |
 | `--one-file` | One `mt_NAME.edb` with the geometry in it, no gamemodes |
 | `--sky PRESET` | Make a sky around the level (see The sky) |
@@ -121,6 +123,7 @@ The Blender side is an add-on, [blender_addon/ge_lightmaps.py](../blender_addon/
 - **Bake Lightmaps** gives every selected mesh a second UV map named `lightmap`, bakes the scene's light (Cycles, without the textures' colour) into an image of its own and packs it into the .blend. Select ten objects, press it once, get coffee.
   *Unwrap* picks how that UV map is made: *Smart UV Project* keeps flat walls in one piece (few seams), *Lightmap Pack* gives every face its own rectangle and fills the whole image (a seam at every edge, fine for boxy rooms). An object that has a `lightmap` UV map keeps it unless *Unwrap Again* is ticked. A bake that comes out black gets a warning: no light reaches the object.
   While it bakes, everything eurochef doesn't draw is left out of the render (portals, collision, `vault`, `climb`, `ladder`, `reference`), a portal would be a wall in the doorway otherwise and the rooms wouldn't light each other. The sky is left out too unless you untick *Bake Without the Sky*: it is around the whole level and keeps the sun out.
+  *Split Large Meshes* cuts a mesh that is too big for one lightmap into several objects first, each with a lightmap of its own: as many as it takes to get *Texels per Metre* out of the size you picked. The pieces are called `NAME_lm2`, `NAME_lm3`... so `Room01`'s pieces are still room 01. They stay cut (Ctrl+J joins them again), and a second bake doesn't cut them further.
 - **Export Level (.glb)** writes the scene with a copy of each baked object named `lightmap_NAME` next to it. The copies only exist in the file, your scene stays as it was.
 - **Remove Lightmaps** takes it off again.
 
@@ -130,6 +133,8 @@ Things worth knowing:
 - The light **multiplies**. White in the lightmap leaves the level as it is, darker darkens, nothing gets brighter than it was. A scene that is brighter than 1 in Blender just bakes white.
 - So a dim scene makes a dark level. The panel's *Exposure* multiplies the bake (2 is twice the light, white at the most), and `--brightness` still brightens everything from the other side, the vertex colours.
 - A lightmapped object doesn't get the importer's light from above, the baked light is its light. Its vertex colours still count, and so does `--brightness`.
+- Far away the game draws a texture's smaller copies, and in those a lightmap's islands run into each other and into the black between them: dark lines along edges. So a lightmap only gets two smaller copies, as the game's own do. `--lightmap-mips 0` gives it none (no lines at all, a bit of shimmer far away), a larger *Margin* in the bake helps too.
+- Seams. The importer fills every texel of a lightmap that no triangle uses with the colour of the nearest one that is used, so the black between the islands never gets drawn. What it can't fix is two faces that sit side by side in the image with nothing between them: *Smart UV Project* has far fewer of those than *Lightmap Pack* (walls stay in one piece), a larger *Island Margin* keeps them apart, *Denoise* and more *Samples* make the faces agree where they meet, and `--lightmap-uncompressed` gets rid of the compression's blocks if you can spare the size.
 - 128 is the size the game uses for a room's worth of walls. Every lightmapped triangle is drawn twice and every image is a texture more, so lightmap what has shadows on it and leave the rest to the vertex colours, the game does the same.
 - Not using Blender's exporter through the add-on? The importer only wants a node whose name starts with `lightmap`, in the same place as the object, whose material's texture is the bake and whose first UV map is the lightmap's. Triangles are matched by where they are, a copy that was moved matches nothing and you get a warning.
 
