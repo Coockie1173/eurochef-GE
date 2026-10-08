@@ -279,7 +279,16 @@ In the Maps tab, click a trigger and the **Entities** window lets you move it, t
 
 ![Screenshot of the new map dialog](./usage-ge/newmap.png)
 
-It has less options than the CLI (no `--spawn`, no `--linear-colours`, and of the sky only the preset, the clouds and the seed). For those, well, there's a terminal.
+Pick a preset under *Sky* and the **Sky settings** open up. This is the one place where the window beats the terminal:
+- a picture of the sky as a player sees it, drag it to look around,
+- the four colours (zenith, horizon, ground, clouds), each a colour picker,
+- sliders for the horizon's falloff and the clouds' cover, size, softness and opacity,
+- the seed, with an *Other clouds* button for when you don't care which number,
+- *Detail* (the sphere's segments), a panorama to use instead of the painted sky, and the sphere's radius if the level's own size isn't what you want.
+
+Picking another preset only swaps the colours and the cloud cover, the rest stays as you set it. Under the picture is the same sky as `ge new-map` options, with a *Copy* button, so once you like it you can put it in a script.
+
+It still has less options than the CLI for everything that isn't the sky (no `--spawn`, no `--linear-colours`). For those, well, there's a terminal.
 
 # Things that will bite you
 In no particular order, all of these got me at least once:

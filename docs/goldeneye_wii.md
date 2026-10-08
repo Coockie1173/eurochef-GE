@@ -36,7 +36,8 @@ eurochef-cli ge edges mt_yard.edb
 - `ge edges` lists what a level file says can be vaulted over, climbed onto and climbed: every
   edge with its flags, every ladder with its foot, its top and its number of pieces.
 - The viewer: *New GoldenEye 007 map* in the menu bar does what `ge new-map` does and opens the
-  result. In the Maps tab the *Entities* window moves the selected trigger, changes its values,
+  result. Its *Sky settings* set a made sky's colours, clouds, panorama and radius, with a
+  picture of it to look around in. In the Maps tab the *Entities* window moves the selected trigger, changes its values,
   duplicates and deletes it, adds new ones at the camera and saves the file. *Export triggers as
   glTF...* there does what `ge export-triggers` does, with the triggers as they are in the window.
   *Show Edges* draws the edges and ladders of the zones' entities over the level: green a vault,

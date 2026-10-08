@@ -14,6 +14,7 @@ use eurochef_edb::{
     versions::Platform,
     Hashcode, HashcodeUtils,
 };
+use eurochef_shared::ge::sky::{self, SkyOptions};
 use eurochef_shared::filesystem::path::DissectedFilelistPath;
 use eurochef_shared::{
     hashcodes::parse_hashcodes, script::UXGeoScript, spreadsheets::UXGeoSpreadsheet,
@@ -98,9 +99,13 @@ struct NewMapDialog {
     scale: f32,
     bake_light: bool,
     /// A made sky's preset. Empty: the scene's own sky, if it has one
-    sky: String,
-    sky_clouds: f32,
-    sky_seed: u64,
+    sky_preset: String,
+    /// The made sky as it is set, a preset to begin with
+    sky: SkyOptions,
+    /// Where the sky's picture looks: degrees around and up
+    sky_look: (f32, f32),
+    /// The sky's picture, None when it has to be drawn again
+    sky_picture: Option<egui::TextureHandle>,
     status: String,
 }
 
@@ -113,9 +118,10 @@ impl Default for NewMapDialog {
             id: 1,
             scale: 1.0,
             bake_light: true,
-            sky: String::new(),
-            sky_clouds: 0.35,
-            sky_seed: 1,
+            sky_preset: String::new(),
+            sky: SkyOptions::preset("day").expect("the day preset"),
+            sky_look: (0.0, 20.0),
+            sky_picture: None,
             status: String::new(),
         }
     }
@@ -206,6 +212,168 @@ impl EurochefApp {
     }
 
     /// The window of File > New GoldenEye 007 map
+    /// The made sky's own settings: a picture of it to look around in, its colours, its clouds
+    /// and where the sphere is
+    fn show_sky_settings(ui: &mut egui::Ui, dialog: &mut NewMapDialog) {
+        const PICTURE: (u32, u32) = (352, 198);
+        egui::CollapsingHeader::new("Sky settings").default_open(true).show(ui, |ui| {
+            let mut changed = false;
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    if dialog.sky_picture.is_none() {
+                        match sky::preview(&dialog.sky, PICTURE, dialog.sky_look.0, dialog.sky_look.1) {
+                            Ok(image) => {
+                                let image = egui::ColorImage::from_rgba_unmultiplied(
+                                    [PICTURE.0 as usize, PICTURE.1 as usize],
+                                    image.as_raw(),
+                                );
+                                dialog.sky_picture = Some(ui.ctx().load_texture("new_map_sky", image, Default::default()));
+                            }
+                            Err(e) => {
+                                ui.colored_label(egui::Color32::LIGHT_RED, format!("{e:#}"));
+                            }
+                        }
+                    }
+                    if let Some(picture) = &dialog.sky_picture {
+                        let response = ui.add(egui::Image::new(picture).sense(egui::Sense::drag()));
+                        let by = response.drag_delta();
+                        if by != egui::Vec2::ZERO {
+                            dialog.sky_look.0 = (dialog.sky_look.0 - by.x * 0.25).rem_euclid(360.0);
+                            dialog.sky_look.1 = (dialog.sky_look.1 + by.y * 0.25).clamp(-89.0, 89.0);
+                            changed = true;
+                        }
+                    }
+                    ui.weak("What a player sees of it. Drag to look around.");
+                });
+                egui::Grid::new("new_map_sky_settings").num_columns(2).show(ui, |ui| {
+                    let sky = &mut dialog.sky;
+                    let painted = sky.texture.is_none();
+                    let mut colour = |ui: &mut egui::Ui, label: &str, colour: &mut sky::Colour, enabled: bool| {
+                        ui.label(label);
+                        // the colours are the way they look, as the picker's bytes are
+                        let mut bytes = colour.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+                        let edited = ui.add_enabled_ui(enabled, |ui| ui.color_edit_button_srgb(&mut bytes).changed()).inner;
+                        if edited {
+                            *colour = bytes.map(|b| b as f32 / 255.0);
+                        }
+                        ui.end_row();
+                        edited
+                    };
+                    changed |= colour(ui, "Zenith", &mut sky.zenith, painted);
+                    changed |= colour(ui, "Horizon", &mut sky.horizon, painted);
+                    changed |= colour(ui, "Ground", &mut sky.ground, painted);
+                    changed |= colour(ui, "Clouds", &mut sky.cloud_colour, painted);
+                    let mut slider = |ui: &mut egui::Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, hint: &str| {
+                        ui.label(label).on_hover_text(hint);
+                        let moved = ui.add_enabled(painted, egui::Slider::new(value, range)).on_hover_text(hint).changed();
+                        ui.end_row();
+                        moved
+                    };
+                    changed |= slider(ui, "Horizon falloff", &mut sky.falloff, 0.2..=3.0, "How soon the horizon gives way to the zenith: below 1 soon, above 1 late");
+                    changed |= slider(ui, "Cloud cover", &mut sky.clouds, 0.0..=1.0, "How much of the sky the clouds take");
+                    changed |= slider(ui, "Cloud size", &mut sky.cloud_scale, 0.5..=10.0, "Larger: smaller clouds");
+                    changed |= slider(ui, "Cloud softness", &mut sky.cloud_softness, 0.02..=0.6, "How soft their edges are");
+                    changed |= slider(ui, "Cloud opacity", &mut sky.cloud_opacity, 0.0..=1.0, "How much of the sky they hide");
+                    ui.label("Seed").on_hover_text("Another number, other clouds");
+                    ui.horizontal(|ui| {
+                        changed |= ui.add_enabled(painted, egui::DragValue::new(&mut sky.seed).range(1..=9999)).changed();
+                        if ui.add_enabled(painted, egui::Button::new("Other clouds")).clicked() {
+                            sky.seed = sky.seed % 9999 + 1;
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Detail").on_hover_text("Segments around the sphere: more is smoother clouds and more triangles");
+                    changed |= ui.add(egui::Slider::new(&mut sky.segments, 16..=128).step_by(4.0)).changed();
+                    ui.end_row();
+
+                    ui.label("Panorama").on_hover_text("A picture of the whole sky unrolled (2:1) in place of the painted one");
+                    ui.horizontal(|ui| {
+                        match &sky.texture {
+                            Some(path) => ui.label(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+                            None => ui.weak("none, the sky is painted"),
+                        };
+                        if ui.button("Browse").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().add_filter("Picture", &["png", "jpg", "jpeg", "tga"]).pick_file() {
+                                sky.texture = Some(path);
+                                changed = true;
+                            }
+                        }
+                        if sky.texture.is_some() && ui.button("Remove").clicked() {
+                            sky.texture = None;
+                            changed = true;
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("Radius").on_hover_text("Of the sphere around the level");
+                    ui.horizontal(|ui| {
+                        let mut own = sky.radius.is_some();
+                        if ui.checkbox(&mut own, "set by hand").changed() {
+                            sky.radius = own.then_some(300.0);
+                        }
+                        match &mut sky.radius {
+                            Some(radius) => {
+                                ui.add(egui::DragValue::new(radius).speed(1.0).range(10.0..=5000.0));
+                            }
+                            None => {
+                                ui.weak("from the level's size");
+                            }
+                        }
+                    });
+                    ui.end_row();
+                });
+            });
+            if changed {
+                dialog.sky_picture = None;
+            }
+            ui.horizontal(|ui| {
+                ui.weak("The same from the command line:");
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(Self::sky_command(&dialog.sky_preset, &dialog.sky));
+                }
+            });
+            ui.add(egui::Label::new(egui::RichText::new(Self::sky_command(&dialog.sky_preset, &dialog.sky)).monospace().small()).wrap());
+        });
+    }
+
+    /// The options of `eurochef-cli ge new-map` that make the sky as it is set
+    fn sky_command(preset: &str, sky: &SkyOptions) -> String {
+        let hex = |c: &sky::Colour| {
+            let b = c.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+            format!("'#{:02x}{:02x}{:02x}'", b[0], b[1], b[2])
+        };
+        let mut words = vec![];
+        match &sky.texture {
+            Some(path) => words.push(format!("--sky-texture '{}'", path.display())),
+            None => {
+                words.push(format!(
+                    "--sky {preset} --sky-zenith {} --sky-horizon {} --sky-ground {} --sky-falloff {:.2} --sky-clouds {:.2}",
+                    hex(&sky.zenith),
+                    hex(&sky.horizon),
+                    hex(&sky.ground),
+                    sky.falloff,
+                    sky.clouds
+                ));
+                if sky.clouds > 0.0 {
+                    words.push(format!(
+                        "--sky-cloud-colour {} --sky-cloud-scale {:.2} --sky-cloud-softness {:.2} --sky-cloud-opacity {:.2} --sky-seed {}",
+                        hex(&sky.cloud_colour),
+                        sky.cloud_scale,
+                        sky.cloud_softness,
+                        sky.cloud_opacity,
+                        sky.seed
+                    ));
+                }
+            }
+        }
+        words.push(format!("--sky-segments {}", sky.segments));
+        if let Some(radius) = sky.radius {
+            words.push(format!("--sky-radius {radius}"));
+        }
+        words.join(" ")
+    }
+
     fn show_new_map(&mut self, ctx: &egui::Context) {
         let Some(dialog) = self.new_map.as_mut() else {
             return;
@@ -266,24 +434,32 @@ impl EurochefApp {
                     ui.end_row();
 
                     ui.label("Sky");
-                    ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_source("new_map_sky")
-                            .selected_text(if dialog.sky.is_empty() { "The scene's own" } else { dialog.sky.as_str() })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut dialog.sky, String::new(), "The scene's own");
-                                for (name, _, clouds) in eurochef_shared::ge::sky::PRESETS {
-                                    if ui.selectable_value(&mut dialog.sky, name.to_string(), name).clicked() {
-                                        dialog.sky_clouds = clouds;
+                    egui::ComboBox::from_id_source("new_map_sky")
+                        .selected_text(if dialog.sky_preset.is_empty() { "The scene's own" } else { dialog.sky_preset.as_str() })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut dialog.sky_preset, String::new(), "The scene's own");
+                            for (name, _, _) in sky::PRESETS {
+                                if ui.selectable_value(&mut dialog.sky_preset, name.to_string(), name).clicked() {
+                                    // a preset's colours and clouds, the rest stays as it was set
+                                    if let Ok(preset) = SkyOptions::preset(name) {
+                                        dialog.sky = SkyOptions {
+                                            zenith: preset.zenith,
+                                            horizon: preset.horizon,
+                                            ground: preset.ground,
+                                            cloud_colour: preset.cloud_colour,
+                                            clouds: preset.clouds,
+                                            ..dialog.sky.clone()
+                                        };
                                     }
+                                    dialog.sky_picture = None;
                                 }
-                            });
-                        if !dialog.sky.is_empty() {
-                            ui.add(egui::Slider::new(&mut dialog.sky_clouds, 0.0..=1.0).text("clouds"));
-                            ui.add(egui::DragValue::new(&mut dialog.sky_seed).range(1..=500).prefix("seed "));
-                        }
-                    });
+                            }
+                        });
                     ui.end_row();
                 });
+                if !dialog.sky_preset.is_empty() {
+                    Self::show_sky_settings(ui, dialog);
+                }
                 ui.add_space(4.0);
                 ui.label("Meshes named collision..., col_... or ucx_... are collided with and not drawn. Without any, the drawn triangles are collided with (not those of a material named ...nocollide...). A node named spawn... is where the player starts. Nodes named RoomXX are rooms and a quad named Portal_XX_YY in an opening joins two: the game then only draws the rooms that are seen. A quad named vault..., vault_long... or climb... on an obstacle's top is what the player gets over or onto, an upright one named ladder... is climbed.");
                 ui.add_space(4.0);
@@ -309,11 +485,7 @@ impl EurochefApp {
                     bake_light: dialog.bake_light,
                     ..Default::default()
                 },
-                sky: eurochef_shared::ge::sky::SkyOptions::preset(&dialog.sky).ok().map(|mut sky| {
-                    sky.clouds = dialog.sky_clouds;
-                    sky.seed = dialog.sky_seed;
-                    sky
-                }),
+                sky: (!dialog.sky_preset.is_empty()).then(|| dialog.sky.clone()),
             };
             let made = project::new_map_from_gltf(&dialog.gltf, &options).and_then(|mut map| {
                 let path = map.save(&dialog.folder)?;
@@ -366,6 +538,8 @@ impl EurochefApp {
         dialog.name = std::path::Path::new(&gltf).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         dialog.folder = "mods".to_string();
         dialog.gltf = gltf;
+        dialog.sky_preset = "dusk".to_string();
+        dialog.sky = SkyOptions { clouds: 0.5, ..SkyOptions::preset("dusk").expect("the dusk preset") };
         self.new_map = Some(dialog);
     }
 
