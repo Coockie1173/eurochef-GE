@@ -91,6 +91,7 @@ This is the whole interface. A mesh or a node (an object in Blender) whose name 
 | `vault_long` | The same, but further | no | no |
 | `climb` | An obstacle's top the player climbs onto | no | no |
 | `ladder` | A ladder | no | no |
+| `lightmap` | A copy of an object with its baked light (see Lightmaps) | as light | no |
 | `reference`, `ref_` | Something to model against, left out completely | no | no |
 
 And two for materials, these go **anywhere in** the material's name:
@@ -112,6 +113,25 @@ The game draws levels unlit, the light is in the vertex colours. So the importer
 Colours get made sRGB, so a grey you painted as 0.5 comes out as 0.5. A white, unshaded vertex shows the texture exactly as it is. Blender lights your scene on top of that and the game doesn't, so when it still comes out darker than what you were looking at, `--brightness 1.5` (or the slider in the window) is the knob.
 Triangles are drawn from their front only, where Blender's normal points. Blender marks every material without Backface Culling as "double sided" in glTF, which would make everything double sided, so that flag is ignored unless you pass `--gltf-double-sided`. Want one fence to be seen from both sides? Name its material `fence_twosided`.
 Textures are resized to powers of two between 8 and 1024. Alpha is one bit: there or not there.
+
+## Lightmaps
+Vertex colours only know about light at the corners, so a shadow across a big floor needs a lot of corners. The game's own levels (Bunker, Archives, Railyard...) get around that the old way: the triangles are drawn a second time with a small texture of baked light, which darkens what is already there. `ge new-map` does the same.
+
+The Blender side is an add-on, [blender_addon/ge_lightmaps.py](../blender_addon/ge_lightmaps.py). One file: *Preferences > Add-ons > Install from Disk*, or open it in the Text Editor and press *Run Script*. It lives in the sidebar (N), tab **GoldenEye**:
+- **Bake Lightmaps** gives every selected mesh a second UV map named `lightmap`, bakes the scene's light (Cycles, without the textures' colour) into an image of its own and packs it into the .blend. Select ten objects, press it once, get coffee.
+  *Unwrap* picks how that UV map is made: *Smart UV Project* keeps flat walls in one piece (few seams), *Lightmap Pack* gives every face its own rectangle and fills the whole image (a seam at every edge, fine for boxy rooms). An object that has a `lightmap` UV map keeps it unless *Unwrap Again* is ticked. A bake that comes out black gets a warning: no light reaches the object.
+  While it bakes, everything eurochef doesn't draw is left out of the render (portals, collision, `vault`, `climb`, `ladder`, `reference`), a portal would be a wall in the doorway otherwise and the rooms wouldn't light each other. The sky is left out too unless you untick *Bake Without the Sky*: it is around the whole level and keeps the sun out.
+- **Export Level (.glb)** writes the scene with a copy of each baked object named `lightmap_NAME` next to it. The copies only exist in the file, your scene stays as it was.
+- **Remove Lightmaps** takes it off again.
+
+Then `ge new-map level.glb` as always. It says how many triangles got baked light.
+
+Things worth knowing:
+- The light **multiplies**. White in the lightmap leaves the level as it is, darker darkens, nothing gets brighter than it was. A scene that is brighter than 1 in Blender just bakes white.
+- So a dim scene makes a dark level. The panel's *Exposure* multiplies the bake (2 is twice the light, white at the most), and `--brightness` still brightens everything from the other side, the vertex colours.
+- A lightmapped object doesn't get the importer's light from above, the baked light is its light. Its vertex colours still count, and so does `--brightness`.
+- 128 is the size the game uses for a room's worth of walls. Every lightmapped triangle is drawn twice and every image is a texture more, so lightmap what has shadows on it and leave the rest to the vertex colours, the game does the same.
+- Not using Blender's exporter through the add-on? The importer only wants a node whose name starts with `lightmap`, in the same place as the object, whose material's texture is the bake and whose first UV map is the lightmap's. Triangles are matched by where they are, a copy that was moved matches nothing and you get a warning.
 
 ## Collision
 By default what you see is what you walk on. That's fine for a box room and annoying for stairs: the body bumps up every single step.

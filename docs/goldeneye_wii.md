@@ -56,6 +56,12 @@ eurochef-cli ge edges mt_yard.edb
   in its name is drawn from both sides, `--gltf-double-sided` goes by glTF's.
 - Vertex colours carry the light (the game draws levels unlit). Without `--no-light` they are
   shaded by a fixed light from above. A colour of 1.0 is stored as 0x80.
+- A node named `lightmap...` is a copy of an object with its baked light: the bake as its
+  material's texture, the lightmap's coordinates as its first texture coordinates
+  (`blender_addon/ge_lightmaps.py` bakes and exports them). It isn't drawn as it is: each of its
+  triangles gives the level's triangle in the same place (to the millimetre) a lightmap, written
+  as one more strip behind the mesh's others, and that triangle isn't shaded by the light from
+  above.
 - A mesh or node named `collision...`, `col_...` or `ucx_...` isn't drawn, it is what a body
   collides with. With any of those in the scene the drawn triangles aren't collided with at
   all. Without: the drawn triangles are, except those of a material with `nocollide` in its
@@ -154,6 +160,19 @@ count, then for each vertex four 16 bit indices: position, normal, colour, textu
 coordinate. Positions are three floats and the normal as three signed bytes (6 fraction
 bits) and a byte 0x77. A short of flags for each triangle in strip order: 0x200 is not
 collided with.
+
+The "transparency" short is two bytes. The first is the strip's blend (`fn_8029E0D0`, which
+hands `fn_802BC520` the GX blend): 0 alpha, 1 added, 2 subtracted, 3 what is there times the
+texture (`GXSetBlendMode(BLEND, ZERO, SRCCLR)`, with the fog made white). The second is a "fade
+layer", a bit of the mesh's state for each.
+
+A lightmap is a strip with blend 3: flags 0x85, transparency 0x0301, as the last strip of its
+mesh, with the mesh's triangles once more (in Bunker's lightmapped rooms all of them, 534 after
+72 + 312 + 110 + 40), a texture of its own (128 x 128) and texture coordinates between 0 and 1.
+Its vertex colours are 0x7F like the rest of such a mesh. The game's have no triangle flags for
+it (the array ends with the strips before it) and are collided with as their variant; the ones
+made here have flags, all "not collided with". Railyard has 484 meshes with a strip of blend
+3, the tank chase 398, Archives 275, Bunker 163, Dam 8, the test level none.
 
 The word at +0x40 has a bit for each "variant" in its low byte and the offset from +0x40 to
 a word for each in the top 24 bits; that word is the offset to the variant (a whole mesh)
