@@ -86,6 +86,8 @@ pub struct SceneTriangle {
     pub room: Option<usize>,
     /// Drawn from behind as well
     pub two_sided: bool,
+    /// Baked light that is drawn over it: a texture of the scene and where each corner is on it
+    pub lightmap: Option<(usize, [[f32; 2]; 3])>,
 }
 
 /// A portal as the scene has it: the triangles of its mesh (a flat quad) and its two rooms
@@ -533,7 +535,7 @@ fn sky_meshes(scene: &GeScene) -> Vec<MeshData> {
         .sky
         .iter()
         .filter(|t| has_area(&t.vertices))
-        .map(|t| (t.texture.map(|i| i as u16 + 1).unwrap_or(0), t.vertices, FACE_NO_COLLISION, t.two_sided))
+        .map(|t| (t.texture.map(|i| i as u16 + 1).unwrap_or(0), t.vertices, FACE_NO_COLLISION, t.two_sided, None))
         .collect();
     drawn_meshes(triangles)
 }
@@ -556,6 +558,7 @@ fn unseen_mesh(hull: &MeshData) -> MeshData {
             triangles: vec![corner(bounds.min), corner(bounds.max)],
             flags: vec![FACE_NO_COLLISION; 2],
             two_sided: false,
+            lightmap: false,
         }],
     }
 }
@@ -592,11 +595,35 @@ struct Placed {
     bounds: Bounds,
 }
 
-/// A drawn triangle: its texture in the file, its corners and its flags
-type Drawn = (u16, [GeVertex; 3], u16, bool);
+/// A drawn triangle: its texture in the file, its corners, its flags, whether it is drawn from
+/// both sides and its lightmap (a texture in the file, where the corners are on it)
+type Drawn = (u16, [GeVertex; 3], u16, bool, Option<(u16, [[f32; 2]; 3])>);
+
+fn part_for(parts: &mut Vec<MeshPart>, texture: u16, two_sided: bool, lightmap: bool) -> &mut MeshPart {
+    let found = parts.iter().position(|p| {
+        p.texture == texture
+            && p.two_sided == two_sided
+            && p.lightmap == lightmap
+            && p.triangles.len() < MAX_STRIP_TRIANGLES
+    });
+    match found {
+        Some(i) => &mut parts[i],
+        None => {
+            parts.push(MeshPart {
+                texture,
+                two_sided,
+                lightmap,
+                ..Default::default()
+            });
+            parts.last_mut().unwrap()
+        }
+    }
+}
 
 /// The meshes of a group: the triangles cut into parts that are small boxes, each part's
-/// triangles sorted by texture
+/// triangles sorted by texture. A triangle's lightmap stays in its mesh, as one more strip
+/// behind the others: the same corners with the lightmap's texture, as the game's own
+/// lightmapped meshes have them
 fn drawn_meshes(triangles: Vec<Drawn>) -> Vec<MeshData> {
     let mut groups = vec![];
     cut(triangles, MAX_DRAWN_TRIANGLES, &|t| centre_of(&t.1), &mut groups);
@@ -604,27 +631,22 @@ fn drawn_meshes(triangles: Vec<Drawn>) -> Vec<MeshData> {
         .into_iter()
         .map(|group| {
             let mut parts: Vec<MeshPart> = vec![];
-            for (texture, triangle, flags, two_sided) in group {
-                let part = match parts
-                    .iter()
-                    .position(|p| {
-                        p.texture == texture && p.two_sided == two_sided && p.triangles.len() < MAX_STRIP_TRIANGLES
-                    })
-                {
-                    Some(i) => &mut parts[i],
-                    None => {
-                        parts.push(MeshPart {
-                            texture,
-                            two_sided,
-                            ..Default::default()
-                        });
-                        parts.last_mut().unwrap()
-                    }
-                };
+            for (texture, triangle, flags, two_sided, lightmap) in group {
+                let part = part_for(&mut parts, texture, two_sided, false);
                 part.triangles.push(triangle);
                 part.flags.push(flags);
+                if let Some((texture, uvs)) = lightmap {
+                    let mut lit = triangle;
+                    for (v, uv) in lit.iter_mut().zip(uvs) {
+                        v.uv = uv;
+                        v.color = [COLOUR_ONE as u8, COLOUR_ONE as u8, COLOUR_ONE as u8, 0xFF];
+                    }
+                    let part = part_for(&mut parts, texture, two_sided, true);
+                    part.triangles.push(lit);
+                    part.flags.push(FACE_NO_COLLISION);
+                }
             }
-            parts.sort_by_key(|p| p.texture);
+            parts.sort_by_key(|p| (p.lightmap, p.texture));
             MeshData { parts }
         })
         .collect()
@@ -642,6 +664,7 @@ fn hulls(collision: Vec<[GeVertex; 3]>) -> Vec<MeshData> {
                 triangles: group,
                 flags: vec![],
                 two_sided: false,
+                lightmap: false,
             }],
         })
         .collect()
@@ -667,6 +690,7 @@ fn make_entities(scene: &GeScene, zoning: Option<&Zoning>, stats: &mut BuildStat
                 t.vertices,
                 if collides { 0 } else { FACE_NO_COLLISION },
                 t.two_sided,
+                t.lightmap.map(|(texture, uvs)| (texture as u16 + 1, uvs)),
             )
         })
         .collect();

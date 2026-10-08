@@ -939,6 +939,7 @@ mod tests {
                     }),
                     no_collision: false,
                     two_sided: false,
+                    lightmap: None,
                     room: Some(index),
                 });
             }

@@ -26,6 +26,10 @@ pub const FLAG_COLLIDES: u32 = 0x100;
 /// from both sides (the game's test level)
 const STRIP_ONE_SIDED: u16 = 0x80;
 const STRIP_TWO_SIDED: u16 = 0x40;
+/// A strip's flags and blend as the game's own lightmaps have them. The byte at +6 is the
+/// blend (fn_8029E0D0): 0 none or alpha, 1 added, 2 subtracted, 3 what is there times the texture
+const STRIP_LIGHTMAP: u16 = 0x05;
+const BLEND_LIGHTMAP: u16 = 0x0301;
 const VERTEX_FORMAT: u32 = 0x203;
 const NORMAL_SCALE: f32 = 63.0;
 const NORMAL_PAD: u8 = 0x77;
@@ -55,6 +59,8 @@ pub struct MeshPart {
     pub flags: Vec<u16>,
     /// Drawn from behind as well
     pub two_sided: bool,
+    /// Drawn over the mesh's other triangles, darkening them by its texture: baked light
+    pub lightmap: bool,
 }
 
 #[derive(Clone, Default)]
@@ -202,6 +208,7 @@ pub fn write_mesh_in(w: &mut Writer, mesh: &MeshData, flags: u32, group: Option<
     let area: f32 = mesh
         .parts
         .iter()
+        .filter(|p| !p.lightmap)
         .flat_map(|p| p.triangles.iter())
         .map(triangle_area)
         .sum();
@@ -316,8 +323,9 @@ pub fn write_mesh_in(w: &mut Writer, mesh: &MeshData, flags: u32, group: Option<
     for (part, list) in mesh.parts.iter().zip(&lists) {
         w.u16(part.triangles.len() as u16);
         w.u16(part.texture);
-        w.u16(if part.two_sided { STRIP_TWO_SIDED } else { STRIP_ONE_SIDED });
-        w.u16(0); // transparency
+        let side = if part.two_sided { STRIP_TWO_SIDED } else { STRIP_ONE_SIDED };
+        w.u16(if part.lightmap { side | STRIP_LIGHTMAP } else { side });
+        w.u16(if part.lightmap { BLEND_LIGHTMAP } else { 0 }); // blend, fade layer
         w.u32(list.len() as u32);
         w.u32(0);
         w.zeros(16);

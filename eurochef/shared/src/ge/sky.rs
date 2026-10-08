@@ -249,6 +249,7 @@ pub fn make_sky(options: &SkyOptions, level: &Bounds) -> anyhow::Result<(Vec<Sce
             no_collision: true,
             room: None,
             two_sided: false,
+            lightmap: None,
         })
     };
     for row in 0..down {

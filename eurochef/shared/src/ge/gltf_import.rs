@@ -32,8 +32,13 @@
 //! `Portal_XX_YY` isn't drawn: its mesh, a flat quad in the opening, is the portal between
 //! rooms XX and YY (`Portal_01_02.001` and `Portal_01_02_b` are more of them). Triangles that
 //! are in no room's node go to the room they lie in.
+//!
+//! Baked light: a node whose name starts with `lightmap` is a copy of an object with the baked
+//! image as its texture and the lightmap's coordinates as its texture coordinates. It isn't
+//! drawn as it is: each of its triangles gives the level's triangle in the same place its
+//! lightmap, which the game draws over it and darkens it by.
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::Context;
 use image::RgbaImage;
@@ -151,6 +156,33 @@ fn edge_of_name(name: Option<&str>) -> Option<u16> {
         .into_iter()
         .find(|(prefix, _)| name.starts_with(prefix))
         .map(|(_, flags)| flags)
+}
+
+/// A copy of an object that is drawn with its baked light: the same triangles, the lightmap as
+/// their one texture and where they are on it as their texture coordinates
+fn is_lightmap_name(name: Option<&str>) -> bool {
+    name.map(|n| n.to_lowercase().starts_with("lightmap")).unwrap_or(false)
+}
+
+/// A place to the millimetre: what two copies of a triangle are told to be the same by
+type Place = [i32; 3];
+
+fn place_of(p: [f32; 3]) -> Place {
+    p.map(|v| (v * 1024.0).round() as i32)
+}
+
+fn places_of(corners: &[[f32; 3]; 3]) -> [Place; 3] {
+    let mut places = corners.map(place_of);
+    places.sort();
+    places
+}
+
+/// A triangle of a lightmap copy: its texture, and each corner's place and where it is on the
+/// texture
+struct LightmapTriangle {
+    texture: usize,
+    corners: [(Place, [f32; 2]); 3],
+    used: bool,
 }
 
 fn is_sky_name(name: Option<&str>) -> bool {
@@ -281,6 +313,9 @@ struct Importer<'a> {
     /// The meshes that stand for an obstacle's top or a ladder: their name, the edges' flags,
     /// their triangles
     tops: Vec<(String, u16, Vec<[[f32; 3]; 3]>)>,
+    /// The lightmap copies' triangles by their corners' places
+    lightmaps: HashMap<[Place; 3], Vec<LightmapTriangle>>,
+    lightmapped: usize,
 }
 
 /// What a node is a part of, handed down to the nodes below it
@@ -334,9 +369,93 @@ impl Importer<'_> {
         Ok(self.white.unwrap())
     }
 
+    /// The lightmap copies of the scene, read before anything else: a triangle is told whether
+    /// it has baked light when it is read
+    fn lightmap_nodes(&mut self, node: &gltf::Node<'_>, parent: &[[f32; 4]; 4], inside: bool) -> anyhow::Result<()> {
+        if is_reference_name(node.name()) {
+            return Ok(());
+        }
+        let matrix = multiply(parent, &node.transform().matrix());
+        let inside = inside || is_lightmap_name(node.name());
+        if let (true, Some(mesh)) = (inside, node.mesh()) {
+            for primitive in mesh.primitives() {
+                if primitive.mode() != gltf::mesh::Mode::Triangles {
+                    continue;
+                }
+                let material = primitive.material();
+                if material.pbr_metallic_roughness().base_color_texture().is_none() {
+                    tracing::warn!(
+                        "{} is a lightmap without a texture, left out",
+                        node.name().unwrap_or("a node")
+                    );
+                    continue;
+                }
+                let texture = self.texture_for(&material)?;
+                let buffers = self.buffers;
+                let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
+                let (Some(positions), Some(uvs)) = (reader.read_positions(), reader.read_tex_coords(0)) else {
+                    continue;
+                };
+                let scale = self.options.scale;
+                let positions: Vec<[f32; 3]> = positions
+                    .map(|p| {
+                        let p = transform_point(&matrix, p);
+                        [-p[0] * scale, p[1] * scale, p[2] * scale]
+                    })
+                    .collect();
+                let uvs: Vec<[f32; 2]> = uvs.into_f32().collect();
+                let indices: Vec<u32> = match reader.read_indices() {
+                    Some(indices) => indices.into_u32().collect(),
+                    None => (0..positions.len() as u32).collect(),
+                };
+                for t in indices.chunks_exact(3) {
+                    let t = [t[0] as usize, t[1] as usize, t[2] as usize];
+                    if t.iter().any(|i| *i >= positions.len() || *i >= uvs.len()) {
+                        continue;
+                    }
+                    let corners = t.map(|i| positions[i]);
+                    self.lightmaps.entry(places_of(&corners)).or_default().push(LightmapTriangle {
+                        texture,
+                        corners: t.map(|i| (place_of(positions[i]), uvs[i])),
+                        used: false,
+                    });
+                }
+            }
+        }
+        for child in node.children() {
+            self.lightmap_nodes(&child, &matrix, inside)?;
+        }
+        Ok(())
+    }
+
+    /// The baked light of a triangle with these corners: a lightmap copy's triangle in the same
+    /// place that no other has taken
+    fn lightmap_of(&mut self, corners: &[[f32; 3]; 3]) -> Option<(usize, [[f32; 2]; 3])> {
+        let copies = self.lightmaps.get_mut(&places_of(corners))?;
+        let copy = copies.iter_mut().find(|c| !c.used)?;
+        copy.used = true;
+        self.lightmapped += 1;
+        // corner by corner: the copy's triangle starts where it likes
+        let mut taken = [false; 3];
+        let uvs = corners.map(|p| {
+            let place = place_of(p);
+            let k = (0..3)
+                .find(|k| !taken[*k] && copy.corners[*k].0 == place)
+                .or_else(|| (0..3).find(|k| !taken[*k]))
+                .unwrap_or(0);
+            taken[k] = true;
+            copy.corners[k].1
+        });
+        Some((copy.texture, uvs))
+    }
+
     fn node(&mut self, node: &gltf::Node<'_>, parent: &[[f32; 4]; 4], inherited: Inherited) -> anyhow::Result<()> {
         // something to model against (a figure the player's size), not a part of the level
         if is_reference_name(node.name()) {
+            return Ok(());
+        }
+        // a lightmap copy and what is below it: read already
+        if is_lightmap_name(node.name()) {
             return Ok(());
         }
         let matrix = multiply(parent, &node.transform().matrix());
@@ -492,6 +611,8 @@ impl Importer<'_> {
         for t in triangles {
             let corners = [positions[t[0]], positions[t[1]], positions[t[2]]];
             let flat = face_normal(&corners);
+            // baked light is the triangle's light: the importer's own would shade it twice
+            let lightmap = if is_sky { None } else { self.lightmap_of(&corners) };
             let vertices = [0, 1, 2].map(|k| {
                 let i = t[k];
                 let normal = normals
@@ -509,7 +630,7 @@ impl Importer<'_> {
                         *c = linear_to_srgb(*c);
                     }
                 }
-                if self.options.bake_light && !is_sky && !painted {
+                if self.options.bake_light && !is_sky && !painted && lightmap.is_none() {
                     let light = transform_direction(
                         &[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0; 4]],
                         LIGHT_DIRECTION,
@@ -541,6 +662,7 @@ impl Importer<'_> {
                 no_collision: no_collision || is_sky,
                 room: part.room,
                 two_sided,
+                lightmap,
             };
             if is_sky {
                 self.scene.sky.push(triangle);
@@ -569,6 +691,8 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         room_ids: vec![],
         portals: vec![],
         tops: vec![],
+        lightmaps: HashMap::new(),
+        lightmapped: 0,
     };
 
     let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
@@ -576,10 +700,25 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         Some(scene) => vec![scene],
         None => document.scenes().collect(),
     };
-    for scene in scenes {
+    for scene in &scenes {
+        for node in scene.nodes() {
+            importer.lightmap_nodes(&node, &identity, false)?;
+        }
+    }
+    for scene in &scenes {
         for node in scene.nodes() {
             importer.node(&node, &identity, Inherited::default())?;
         }
+    }
+    let unused = importer.lightmaps.values().flatten().filter(|t| !t.used).count();
+    if importer.lightmapped > 0 || unused > 0 {
+        tracing::info!("{} triangle(s) with baked light", importer.lightmapped);
+    }
+    if unused > 0 {
+        tracing::warn!(
+            "{unused} triangle(s) of lightmap copies have no triangle of the level in their place, left out: \
+             a lightmap copy has to be where its object is"
+        );
     }
 
     if importer.skipped_primitives > 0 {

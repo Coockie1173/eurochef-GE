@@ -200,7 +200,7 @@ mod tests {
         };
         let mut scene = GeScene::default();
         for vertices in [triangle(0, 1, 2), triangle(0, 2, 3)] {
-            scene.triangles.push(SceneTriangle { vertices, texture: None, no_collision: false, room: None, two_sided: false });
+            scene.triangles.push(SceneTriangle { vertices, texture: None, no_collision: false, room: None, two_sided: false, lightmap: None });
         }
         scene.edges.push(SceneEdge { from: [0.0, 1.1, 2.0], to: [1.0, 1.1, 2.0], flags: EDGE_VAULT });
         scene.ladders.push(SceneLadder {
@@ -239,6 +239,7 @@ mod tests {
                 no_collision: false,
                 room: None,
                 two_sided: false,
+                lightmap: None,
             })
         };
         let front = scene.ladders[0].front();
