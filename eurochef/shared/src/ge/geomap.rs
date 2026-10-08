@@ -1031,17 +1031,34 @@ fn list_head(w: &mut Writer, count: usize, hashes: i16) -> usize {
     w.rel()
 }
 
+/// A level in one file: the scene with its edges and ladders
 pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u8>, BuildStats) {
-    build_map_file(scene, file_hash, HC_MAP, time)
+    let (ladders, warnings) = scene.fitted_ladders();
+    let (file, mut stats) = build_map_file(scene, file_hash, HC_MAP, time, &scene.edges, &ladders);
+    stats.warnings.extend(warnings);
+    (file, stats)
 }
 
-/// A file with nothing in its map: what a level that loads its geometry from another file is
-/// before it gets its triggers
-pub fn build_empty_file(file_hash: u32, time: u32) -> Vec<u8> {
-    build_map_file(&GeScene::default(), file_hash, HC_TRIGGER_MAP, time).0
+/// The scene without its edges and ladders: the game doesn't ask a file that a level loads for
+/// them, they go into the level's own (`build_empty_file`)
+pub fn build_shared_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u8>, BuildStats) {
+    build_map_file(scene, file_hash, HC_MAP, time, &[], &[])
 }
 
-fn build_map_file(scene: &GeScene, file_hash: u32, map_hash: u32, time: u32) -> (Vec<u8>, BuildStats) {
+/// A file with nothing in its map but the edges and ladders (`GeScene::fitted_ladders`): what a
+/// level that loads its geometry from another file is before it gets its triggers
+pub fn build_empty_file(file_hash: u32, time: u32, edges: &[SceneEdge], ladders: &[SceneLadder]) -> Vec<u8> {
+    build_map_file(&GeScene::default(), file_hash, HC_TRIGGER_MAP, time, edges, ladders).0
+}
+
+fn build_map_file(
+    scene: &GeScene,
+    file_hash: u32,
+    map_hash: u32,
+    time: u32,
+    edges: &[SceneEdge],
+    ladders: &[SceneLadder],
+) -> (Vec<u8>, BuildStats) {
     let mut stats = BuildStats::default();
     let zoning = make_zoning(scene);
     let zoning = zoning.as_ref();
@@ -1423,7 +1440,7 @@ fn build_map_file(scene: &GeScene, file_hash: u32, map_hash: u32, time: u32) -> 
     // an edge is its zone's: the one in front of it, where the player stands, and the one behind
     // it when that is another
     let mut edges_by_zone: Vec<Vec<SceneEdge>> = vec![vec![]; zone_count];
-    for edge in &scene.edges {
+    for edge in edges {
         let Some(zoning) = zoning else {
             edges_by_zone[0].push(edge.clone());
             continue;
@@ -1442,10 +1459,8 @@ fn build_map_file(scene: &GeScene, file_hash: u32, map_hash: u32, time: u32) -> 
     // a ladder is the zones' the player is in on it: in front of its foot, its middle and its
     // top, and behind the top where the climb ends
     let mut ladders_by_zone: Vec<Vec<SceneLadder>> = vec![vec![]; zone_count];
-    let (ladders, ladder_warnings) = scene.fitted_ladders();
     stats.ladders = ladders.len();
-    stats.warnings.extend(ladder_warnings);
-    for ladder in &ladders {
+    for ladder in ladders {
         let Some(zoning) = zoning else {
             ladders_by_zone[0].push(ladder.clone());
             continue;

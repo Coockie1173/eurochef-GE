@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 use super::{
-    geomap::{build_geometry_file, BuildStats, GeScene, ModeItemKind, EDGE_HEIGHTS},
+    geomap::{build_geometry_file, build_shared_geometry_file, BuildStats, GeScene, ModeItemKind, SceneEdge, SceneLadder, EDGE_HEIGHTS},
     gltf_import::{import_gltf, ImportOptions},
     level::{
         black_box_trigger, console_trigger, geometry_hash, golden_gun_trigger, level_hash, make_level_of_geometry,
@@ -70,6 +70,9 @@ pub struct NewMap {
     more: Vec<GeTrigger>,
     /// Split: each gamemode's triggers
     mode_triggers: Vec<(GameMode, Vec<GeTrigger>)>,
+    /// Split: what every level file gets, the geometry file has none
+    edges: Vec<SceneEdge>,
+    ladders: Vec<SceneLadder>,
 }
 
 /// A file `NewMap::save` wrote
@@ -142,12 +145,12 @@ impl NewMap {
         if self.split {
             let geometry = free_hash(geometry_hash(self.id), &mut taken);
             self.geometry[4..8].copy_from_slice(&geometry.to_be_bytes());
-            let level = make_trigger_level(self.level_hash, geometry, self.time, self.spawn, &[])?;
+            let level = make_trigger_level(self.level_hash, geometry, self.time, self.spawn, &[], &self.edges, &self.ladders)?;
             files.push((level_path, self.level_hash, level, None));
             files.push((geometry_path, geometry, self.geometry.clone(), None));
             for (mode, triggers) in &self.mode_triggers {
                 let hash = free_hash(mode_level_hash(self.id, *mode), &mut taken);
-                let level = make_trigger_level(hash, geometry, self.time, self.spawn, triggers)?;
+                let level = make_trigger_level(hash, geometry, self.time, self.spawn, triggers, &self.edges, &self.ladders)?;
                 files.push((mode_path(*mode), hash, level, Some(*mode)));
             }
             for (mode, _) in &self.left_out {
@@ -236,7 +239,19 @@ pub fn new_map_from_scene(scene: &GeScene, options: &NewMapOptions) -> anyhow::R
     let level_hash = level_hash(options.id);
     let spawn = options.spawn.unwrap_or_else(|| scene.default_spawn());
 
-    let (geometry, mut stats) = build_geometry_file(scene, level_hash, time);
+    // split: the edges and ladders are the level files', the game doesn't ask the geometry file
+    let (mut edges, mut ladders) = (vec![], vec![]);
+    let (geometry, mut stats) = if options.split {
+        let (file, mut stats) = build_shared_geometry_file(scene, level_hash, time);
+        let (fitted, warnings) = scene.fitted_ladders();
+        stats.ladders = fitted.len();
+        stats.warnings.extend(warnings);
+        edges = scene.edges.clone();
+        ladders = fitted;
+        (file, stats)
+    } else {
+        build_geometry_file(scene, level_hash, time)
+    };
     // the game stops for good on a multiplayer spawn point without floor within a metre below
     // it: each is put on the floor it stands over
     let mut anyones = vec![];
@@ -338,6 +353,8 @@ pub fn new_map_from_scene(scene: &GeScene, options: &NewMapOptions) -> anyhow::R
         geometry,
         more,
         mode_triggers: per_mode,
+        edges,
+        ladders,
     })
 }
 

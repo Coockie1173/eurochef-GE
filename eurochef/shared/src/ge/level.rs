@@ -9,7 +9,7 @@
 use anyhow::ensure;
 
 use super::{
-    geomap::{build_empty_file, HC_MAP},
+    geomap::{build_empty_file, SceneEdge, SceneLadder, HC_MAP},
     triggers::{
         read_triggers, write_triggers, GeTrigger, LOADED_MAP, TRIGGER_LOAD_MAP, TRIGGER_MULTIPLAYER_SPAWN, TRIGGER_SPAWN,
     },
@@ -122,15 +122,17 @@ pub fn black_box_trigger(position: [f32; 3]) -> GeTrigger {
 
 /// A level that is only triggers: one that loads the map of the geometry file, the player's
 /// spawn point and `more`. The geometry is there before the player is (the game's multiplayer
-/// maps are made this way)
+/// maps are made this way). What the player vaults over and climbs is the level's own
 pub fn make_trigger_level(
     level_hash: u32,
     geometry_hash: u32,
     time: u32,
     spawn: [f32; 3],
     more: &[GeTrigger],
+    edges: &[SceneEdge],
+    ladders: &[SceneLadder],
 ) -> anyhow::Result<Vec<u8>> {
-    let empty = build_empty_file(level_hash, time);
+    let empty = build_empty_file(level_hash, time, edges, ladders);
     let mut set = read_triggers(&empty)?;
     let mut load = GeTrigger::new(TRIGGER_LOAD_MAP, [-0.5, 0.5, 0.5]);
     load.data[0] = Some(geometry_hash);
