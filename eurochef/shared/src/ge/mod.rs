@@ -8,6 +8,7 @@ pub mod level;
 pub mod mesh;
 pub mod project;
 pub mod rooms;
+pub mod sky;
 pub mod texture;
 pub mod triggers;
 pub mod writer;

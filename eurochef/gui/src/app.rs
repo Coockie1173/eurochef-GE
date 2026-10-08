@@ -97,6 +97,10 @@ struct NewMapDialog {
     id: u32,
     scale: f32,
     bake_light: bool,
+    /// A made sky's preset. Empty: the scene's own sky, if it has one
+    sky: String,
+    sky_clouds: f32,
+    sky_seed: u64,
     status: String,
 }
 
@@ -109,6 +113,9 @@ impl Default for NewMapDialog {
             id: 1,
             scale: 1.0,
             bake_light: true,
+            sky: String::new(),
+            sky_clouds: 0.35,
+            sky_seed: 1,
             status: String::new(),
         }
     }
@@ -257,9 +264,28 @@ impl EurochefApp {
                     ui.label("Light");
                     ui.checkbox(&mut dialog.bake_light, "Shade the vertex colours from above");
                     ui.end_row();
+
+                    ui.label("Sky");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_source("new_map_sky")
+                            .selected_text(if dialog.sky.is_empty() { "The scene's own" } else { dialog.sky.as_str() })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut dialog.sky, String::new(), "The scene's own");
+                                for (name, _, clouds) in eurochef_shared::ge::sky::PRESETS {
+                                    if ui.selectable_value(&mut dialog.sky, name.to_string(), name).clicked() {
+                                        dialog.sky_clouds = clouds;
+                                    }
+                                }
+                            });
+                        if !dialog.sky.is_empty() {
+                            ui.add(egui::Slider::new(&mut dialog.sky_clouds, 0.0..=1.0).text("clouds"));
+                            ui.add(egui::DragValue::new(&mut dialog.sky_seed).range(1..=500).prefix("seed "));
+                        }
+                    });
+                    ui.end_row();
                 });
                 ui.add_space(4.0);
-                ui.label("Meshes named collision..., col_... or ucx_... are collided with and not drawn. Without any, the drawn triangles are collided with (not those of a material named ...nocollide...). A node named spawn... is where the player starts. Nodes named RoomXX are rooms and a quad named Portal_XX_YY in an opening joins two: the game then only draws the rooms that are seen.");
+                ui.label("Meshes named collision..., col_... or ucx_... are collided with and not drawn. Without any, the drawn triangles are collided with (not those of a material named ...nocollide...). A node named spawn... is where the player starts. Nodes named RoomXX are rooms and a quad named Portal_XX_YY in an opening joins two: the game then only draws the rooms that are seen. A quad named vault..., vault_long... or climb... on an obstacle's top is what the player gets over or onto, an upright one named ladder... is climbed.");
                 ui.add_space(4.0);
                 create = ui
                     .add_enabled(
@@ -283,6 +309,11 @@ impl EurochefApp {
                     bake_light: dialog.bake_light,
                     ..Default::default()
                 },
+                sky: eurochef_shared::ge::sky::SkyOptions::preset(&dialog.sky).ok().map(|mut sky| {
+                    sky.clouds = dialog.sky_clouds;
+                    sky.seed = dialog.sky_seed;
+                    sky
+                }),
             };
             let made = project::new_map_from_gltf(&dialog.gltf, &options).and_then(|mut map| {
                 let path = map.save(&dialog.folder)?;

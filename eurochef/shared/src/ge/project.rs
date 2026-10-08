@@ -9,6 +9,7 @@ use super::{
     geomap::{build_geometry_file, BuildStats, GeScene, EDGE_HEIGHTS},
     gltf_import::{import_gltf, ImportOptions},
     level::{level_hash, make_level_of_geometry, multiplayer_spawn_trigger},
+    sky::{put_sky, SkyOptions},
 };
 
 /// How far below a floor a multiplayer spawn point may be modelled and still be put on it
@@ -23,6 +24,8 @@ pub struct NewMapOptions {
     /// Where the player starts. None: the scene's own spawn point, or its floor in the middle
     pub spawn: Option<[f32; 3]>,
     pub import: ImportOptions,
+    /// A made sky around the level, in place of the scene's own. None: the scene's, if it has one
+    pub sky: Option<SkyOptions>,
 }
 
 impl Default for NewMapOptions {
@@ -32,6 +35,7 @@ impl Default for NewMapOptions {
             id: 1,
             spawn: None,
             import: ImportOptions::default(),
+            sky: None,
         }
     }
 }
@@ -147,6 +151,9 @@ pub fn new_map_from_scene(scene: &GeScene, options: &NewMapOptions) -> anyhow::R
 }
 
 pub fn new_map_from_gltf<P: AsRef<Path>>(gltf: P, options: &NewMapOptions) -> anyhow::Result<NewMap> {
-    let scene = import_gltf(gltf, &options.import)?;
+    let mut scene = import_gltf(gltf, &options.import)?;
+    if let Some(sky) = &options.sky {
+        put_sky(&mut scene, sky)?;
+    }
     new_map_from_scene(&scene, options)
 }

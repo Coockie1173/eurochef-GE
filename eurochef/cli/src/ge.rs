@@ -9,8 +9,111 @@ use eurochef_shared::ge::{
     gltf_import::{import_gltf, ImportOptions},
     level::geometry_hash,
     project::{new_map_from_gltf, NewMapOptions},
+    sky::{self, SkyOptions},
     triggers::{read_triggers, write_triggers, GeTrigger},
 };
+
+/// A made sky: a sphere around the level with the sky painted on it
+#[derive(clap::Args, Debug, Clone)]
+pub struct SkyArgs {
+    /// Make a sky around the level: day, overcast, dusk, night or space (`ge sky --list`)
+    #[arg(long, value_name = "PRESET")]
+    sky: Option<String>,
+
+    /// A picture of the whole sky unrolled (.png, .jpg or .tga, 2:1) in place of the painted one
+    #[arg(long, value_name = "PANORAMA")]
+    sky_texture: Option<String>,
+
+    /// The colour straight up, #RRGGBB
+    #[arg(long)]
+    sky_zenith: Option<String>,
+
+    /// The colour at the horizon
+    #[arg(long)]
+    sky_horizon: Option<String>,
+
+    /// The colour below the horizon
+    #[arg(long)]
+    sky_ground: Option<String>,
+
+    /// How soon the horizon gives way to the zenith: below 1 soon, above 1 late (0.6)
+    #[arg(long)]
+    sky_falloff: Option<f32>,
+
+    /// How much of the sky the clouds take, 0 to 1 (0: none)
+    #[arg(long)]
+    sky_clouds: Option<f32>,
+
+    #[arg(long)]
+    sky_cloud_colour: Option<String>,
+
+    /// Larger: smaller clouds (3)
+    #[arg(long)]
+    sky_cloud_scale: Option<f32>,
+
+    /// How soft the clouds' edges are (0.18)
+    #[arg(long)]
+    sky_cloud_softness: Option<f32>,
+
+    /// How much of the sky the clouds hide (0.9)
+    #[arg(long)]
+    sky_cloud_opacity: Option<f32>,
+
+    /// Another number, other clouds
+    #[arg(long)]
+    sky_seed: Option<u64>,
+
+    /// Of the sphere. Without it: the level's size times 2.5, 50 at least
+    #[arg(long)]
+    sky_radius: Option<f32>,
+
+    /// Of the sphere, "x,y,z" in the game's coordinates. Without it: the level's middle
+    #[arg(long, allow_hyphen_values = true)]
+    sky_centre: Option<String>,
+
+    /// Around the sphere, half of it down (64)
+    #[arg(long)]
+    sky_segments: Option<usize>,
+}
+
+impl SkyArgs {
+    /// The sky that was asked for. None when nothing of it was: the scene's own stays
+    fn options(&self, always: bool) -> anyhow::Result<Option<SkyOptions>> {
+        let given = self.sky.is_some()
+            || self.sky_texture.is_some()
+            || self.sky_zenith.is_some()
+            || self.sky_horizon.is_some()
+            || self.sky_ground.is_some()
+            || self.sky_clouds.is_some()
+            || self.sky_cloud_colour.is_some()
+            || self.sky_seed.is_some();
+        if !given && !always {
+            return Ok(None);
+        }
+        let mut o = SkyOptions::preset(self.sky.as_deref().unwrap_or("day"))?;
+        let colour = |text: &Option<String>, into: &mut sky::Colour| -> anyhow::Result<()> {
+            if let Some(text) = text {
+                *into = sky::colour_of(text)?;
+            }
+            Ok(())
+        };
+        colour(&self.sky_zenith, &mut o.zenith)?;
+        colour(&self.sky_horizon, &mut o.horizon)?;
+        colour(&self.sky_ground, &mut o.ground)?;
+        colour(&self.sky_cloud_colour, &mut o.cloud_colour)?;
+        o.clouds = self.sky_clouds.unwrap_or(o.clouds).clamp(0.0, 1.0);
+        o.falloff = self.sky_falloff.unwrap_or(o.falloff);
+        o.cloud_scale = self.sky_cloud_scale.unwrap_or(o.cloud_scale);
+        o.cloud_softness = self.sky_cloud_softness.unwrap_or(o.cloud_softness);
+        o.cloud_opacity = self.sky_cloud_opacity.unwrap_or(o.cloud_opacity);
+        o.seed = self.sky_seed.unwrap_or(o.seed);
+        o.segments = self.sky_segments.unwrap_or(o.segments);
+        o.radius = self.sky_radius;
+        o.centre = self.sky_centre.as_deref().map(parse_vec3).transpose()?;
+        o.texture = self.sky_texture.as_ref().map(std::path::PathBuf::from);
+        Ok(Some(o))
+    }
+}
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum GeCommand {
@@ -54,6 +157,9 @@ pub enum GeCommand {
         /// ...nocull are
         #[arg(long)]
         gltf_double_sided: bool,
+
+        #[command(flatten)]
+        sky: SkyArgs,
     },
     /// Make only a geometry file from a glTF scene
     Geometry {
@@ -79,6 +185,30 @@ pub enum GeCommand {
 
         #[arg(long)]
         gltf_double_sided: bool,
+    },
+    /// Try a made sky out before a level gets it: a picture of what a player sees of it, with
+    /// the same --sky... options `new-map` takes
+    Sky {
+        /// List the presets
+        #[arg(long)]
+        list: bool,
+
+        /// The .png to write
+        #[arg(long, value_name = "PICTURE")]
+        preview: Option<String>,
+
+        /// Where the picture looks, "AROUND,UP" in degrees
+        #[arg(long, default_value = "0,20", allow_hyphen_values = true)]
+        look: String,
+
+        #[command(flatten)]
+        sky: SkyArgs,
+    },
+    /// List what a level file says can be vaulted over, climbed onto and climbed: its edges
+    /// and ladders
+    Edges {
+        /// .edb file to read
+        filename: String,
     },
     /// List the triggers (entities) of a file's map
     Triggers {
@@ -206,6 +336,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             no_light,
             linear_colours,
             gltf_double_sided,
+            sky,
         } => {
             let options = NewMapOptions {
                 name,
@@ -217,6 +348,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     linear_colours,
                     gltf_double_sided,
                 },
+                sky: sky.options(false)?,
             };
             let mut map = new_map_from_gltf(&gltf, &options)?;
             let wanted = map.level_hash;
@@ -288,6 +420,57 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             let (data, stats) = build_geometry_file(&scene, hash.unwrap_or(geometry_hash(1)), time);
             std::fs::write(&output, &data).with_context(|| format!("couldn't write {output}"))?;
             println!("{output}: {} bytes, {stats:?}", data.len());
+            Ok(())
+        }
+        GeCommand::Sky { list, preview, look, sky: args } => {
+            if list {
+                for (name, [zenith, horizon, ground, cloud], share) in sky::PRESETS {
+                    println!("{name:9} zenith {zenith} horizon {horizon} ground {ground} clouds {cloud} over {share}");
+                }
+                return Ok(());
+            }
+            let Some(picture) = preview else {
+                anyhow::bail!("name a picture with --preview, or --list the presets. A level gets a sky with `ge new-map --sky PRESET`");
+            };
+            let options = args.options(true)?.unwrap();
+            let (around, up) = look.split_once(',').with_context(|| format!("\"{look}\" isn't AROUND,UP"))?;
+            let image = sky::preview(&options, (960, 540), around.trim().parse()?, up.trim().parse()?)?;
+            image.save(&picture).with_context(|| format!("couldn't write {picture}"))?;
+            println!("{picture}: the sky as a player sees it");
+            Ok(())
+        }
+        GeCommand::Edges { filename } => {
+            let data = std::fs::read(&filename).with_context(|| format!("couldn't read {filename}"))?;
+            let sets = read_edges(&data);
+            if sets.is_empty() {
+                println!("no edges in {filename}");
+            }
+            for set in &sets {
+                println!(
+                    "{} at {:#x}: {} edge(s), {} polygon(s)",
+                    if set.zone { "a zone's entity" } else { "an entity" },
+                    set.entity,
+                    set.edges.len(),
+                    set.polygons.len()
+                );
+                let p = |p: &[f32; 3]| format!("{:.2} {:.2} {:.2}", p[0], p[1], p[2]);
+                for edge in &set.edges {
+                    println!("  {:04x} {:<10} {} > {}", edge.flags, edge_name(edge.flags), p(&edge.from), p(&edge.to));
+                }
+                for ladder in set.ladders() {
+                    println!(
+                        "  {:04x} {:<10} {} > {}, {} piece(s)",
+                        POLYGON_RUNG,
+                        edge_name(POLYGON_RUNG),
+                        p(&ladder.foot),
+                        p(&ladder.top),
+                        ladder.pieces
+                    );
+                }
+                for polygon in set.polygons.iter().filter(|r| r.flags & POLYGON_RUNG == 0) {
+                    println!("  {:04x} polygon of {} corners at {}", polygon.flags, polygon.corners.len(), p(&polygon.corners[0]));
+                }
+            }
             Ok(())
         }
         GeCommand::Triggers { filename } => {
