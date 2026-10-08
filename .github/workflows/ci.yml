@@ -19,7 +19,7 @@ jobs:
       matrix:
         platform: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - uses: Swatinem/rust-cache@v2
 
@@ -50,7 +50,7 @@ jobs:
 
       - name: Publish artifact (Windows)
         if: matrix.platform == 'windows-latest'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: eurochef-win-${{ env.GITHUB_SHA_SHORT }}
           path: |
@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: true
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Create temp dir
         run: mkdir addon_temp
@@ -80,7 +80,7 @@ jobs:
           echo "GITHUB_SHA_SHORT=$GITHUB_SHA_SHORT" >> $GITHUB_ENV
 
       - name: Publish artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: blender-eurochef-utils-${{ env.GITHUB_SHA_SHORT }}
           path: addon_temp/

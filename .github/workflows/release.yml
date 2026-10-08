@@ -1,0 +1,120 @@
+name: Release
+
+# a tag v... makes a release of that name. Every push to main makes the "latest" one again
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write # for making the release
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: windows
+            platform: windows-latest
+            exe: .exe
+          # the oldest runner there is: its glibc is what the programs ask for
+          - name: linux
+            platform: ubuntu-22.04
+            exe: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev
+
+      - name: Build
+        run: cargo build --release --locked -p eurochef-cli -p eurochef-gui
+
+      - name: Cargo test
+        if: matrix.name == 'linux'
+        run: cargo test --release --locked
+
+      # the programs, the trigger definitions and icons they look for next to them, and the docs
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p package/eurochef
+          cp target/release/eurochef${{ matrix.exe }} target/release/eurochef-cli${{ matrix.exe }} package/eurochef/
+          cp -r assets docs package/eurochef/
+          cp LICENSE README.md player_size_reference.gltf package/eurochef/
+          cd package
+          if [ "${{ matrix.name }}" = windows ]; then
+            7z a ../eurochef-windows.zip eurochef
+          else
+            tar czf ../eurochef-linux.tar.gz eurochef
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eurochef-${{ matrix.name }}
+          path: |
+            eurochef-windows.zip
+            eurochef-linux.tar.gz
+          if-no-files-found: error
+
+  addon:
+    name: Package Blender addon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip addon
+        run: |
+          mkdir addon_temp
+          cp -r blender_addon addon_temp/eurochef_utils
+          cd addon_temp && zip -r ../blender-eurochef-utils.zip eurochef_utils
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blender-eurochef-utils
+          path: blender-eurochef-utils.zip
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [build, addon]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Release the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+      # the one release that follows main: the old one and its tag go, a new one comes at this commit
+      - name: Release latest
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest artifacts/* --title "Latest build" --prerelease --target "$GITHUB_SHA" \
+            --notes "Built from $(git rev-parse --short "$GITHUB_SHA"): $(git log -1 --format=%s)"
