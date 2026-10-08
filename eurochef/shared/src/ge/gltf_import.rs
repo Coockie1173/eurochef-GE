@@ -21,7 +21,9 @@
 //! A mesh or node whose name starts with `vault`, `vault_long` or `climb` isn't drawn or collided
 //! with: it stands for the top of an obstacle (a quad or a box that ends where the obstacle's top
 //! does) and the rim of its faces that look up become the edges the player vaults over (about
-//! 1.25 or 1.6 past the edge) or climbs up onto, from outside.
+//! 1.25 or 1.6 past the edge) or climbs up onto, from outside. One whose name starts with
+//! `ladder` isn't drawn or collided with either: a flat upright quad that looks at the player
+//! on it, as wide and as tall as the ladder.
 //!
 //! Rooms and portals (see `rooms`): a node named `RoomXX` holds a room, with everything below
 //! it (`Room01`, `Room_01`, `Room01_walls` and `Room01.001` are all room 01). A node named
@@ -35,7 +37,7 @@ use anyhow::Context;
 use image::RgbaImage;
 
 use super::{
-    geomap::{rim_edges, GeScene, ScenePortal, SceneSpawn, SceneTriangle, EDGE_CLIMB, EDGE_LONG_VAULT, EDGE_VAULT},
+    geomap::{ladder_of, rim_edges, GeScene, ScenePortal, SceneSpawn, SceneTriangle, EDGE_CLIMB, EDGE_LADDER_TOP, EDGE_LONG_VAULT, EDGE_VAULT},
     mesh::{GeVertex, COLOUR_ONE},
     texture::GeTexture,
 };
@@ -113,10 +115,17 @@ fn team_of_name(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// What the edges of a mesh or node named `vault...`, `vault_long...` or `climb...` are
+/// What the edges of a mesh or node named `vault...`, `vault_long...`, `climb...` or `ladder...`
+/// are
 fn edge_of_name(name: Option<&str>) -> Option<u16> {
     let name = name?.to_lowercase();
-    [("vault_long", EDGE_LONG_VAULT), ("long_vault", EDGE_LONG_VAULT), ("vault", EDGE_VAULT), ("climb", EDGE_CLIMB)]
+    [
+        ("vault_long", EDGE_LONG_VAULT),
+        ("long_vault", EDGE_LONG_VAULT),
+        ("vault", EDGE_VAULT),
+        ("climb", EDGE_CLIMB),
+        ("ladder", EDGE_LADDER_TOP),
+    ]
         .into_iter()
         .find(|(prefix, _)| name.starts_with(prefix))
         .map(|(_, flags)| flags)
@@ -247,7 +256,8 @@ struct Importer<'a> {
     room_ids: Vec<String>,
     /// The portals, with the rooms they name
     portals: Vec<(String, [String; 2], Vec<[[f32; 3]; 3]>)>,
-    /// The meshes that stand for an obstacle's top: their name, the edges' flags, their triangles
+    /// The meshes that stand for an obstacle's top or a ladder: their name, the edges' flags,
+    /// their triangles
     tops: Vec<(String, u16, Vec<[[f32; 3]; 3]>)>,
 }
 
@@ -541,6 +551,13 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         );
     }
     for (name, flags, triangles) in std::mem::take(&mut importer.tops) {
+        if flags == EDGE_LADDER_TOP {
+            match ladder_of(&triangles) {
+                Some(ladder) => importer.scene.ladders.push(ladder),
+                None => tracing::warn!("{name} has no face that looks sideways, it is no ladder: make it an upright quad that looks at the player on it"),
+            }
+            continue;
+        }
         let edges = rim_edges(&triangles, flags);
         if edges.is_empty() {
             tracing::warn!("{name} has no face that looks up, nothing of it can be vaulted or climbed");

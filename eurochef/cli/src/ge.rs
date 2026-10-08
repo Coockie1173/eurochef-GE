@@ -241,6 +241,9 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             if map.stats.edges > 0 {
                 println!("{} edges to vault over or climb", map.stats.edges);
             }
+            if map.stats.ladders > 0 {
+                println!("{} ladders", map.stats.ladders);
+            }
             if map.stats.multiplayer_spawns > 0 {
                 println!("{} multiplayer spawn points", map.stats.multiplayer_spawns);
             }

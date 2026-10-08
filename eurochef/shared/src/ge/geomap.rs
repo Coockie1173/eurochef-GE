@@ -120,6 +120,15 @@ pub const EDGE_VAULT: u16 = 0x01;
 pub const EDGE_LONG_VAULT: u16 = 0x02;
 /// The player climbs up and stands on the top behind it
 pub const EDGE_CLIMB: u16 = 0x10;
+/// A ladder's top: where the player gets on from above and off at the end of the climb
+pub const EDGE_LADDER_TOP: u16 = 0x100;
+/// A polygon that is a piece of a ladder
+pub const POLYGON_RUNG: u16 = 0x1000;
+/// How tall the game's own pieces of a ladder are
+pub const RUNG_HEIGHT: f32 = 0.5;
+/// How far above the floor a ladder's lowest piece ends, as the game's own do: the player who
+/// comes down one that reaches the floor never gets off it
+pub const LADDER_FOOT: f32 = 0.5;
 /// How far in front of an edge and behind it the zones are looked up that get it
 const EDGE_ZONE_REACH: f32 = 0.5;
 /// How far above the player the game takes an edge
@@ -168,6 +177,97 @@ pub fn rim_edges(triangles: &[[[f32; 3]; 3]], flags: u16) -> Vec<SceneEdge> {
     edges
 }
 
+/// A ladder: an upright strip the player climbs, facing it. `top` is the edge at its upper end
+/// and runs as a vault's edge does (the player gets off towards `(dz, 0, -dx)` of it), `bottom`
+/// are the two corners below its ends
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneLadder {
+    pub top: [[f32; 3]; 2],
+    pub bottom: [[f32; 3]; 2],
+}
+
+impl SceneLadder {
+    pub fn height(&self) -> f32 {
+        (self.top[0][1] + self.top[1][1] - self.bottom[0][1] - self.bottom[1][1]) * 0.5
+    }
+
+    pub fn width(&self) -> f32 {
+        let d = [0, 1, 2].map(|k| self.top[1][k] - self.top[0][k]);
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    /// The way the top runs, level
+    pub fn along(&self) -> [f32; 3] {
+        let (dx, dz) = (self.top[1][0] - self.top[0][0], self.top[1][2] - self.top[0][2]);
+        let len = (dx * dx + dz * dz).sqrt().max(1e-6);
+        [dx / len, 0.0, dz / len]
+    }
+
+    /// From the ladder to the player on it, level
+    pub fn front(&self) -> [f32; 3] {
+        let along = self.along();
+        [-along[2], 0.0, along[0]]
+    }
+
+    /// The pieces from the lowest up, as the game's own ladders have them: corners at the
+    /// bottom and the top of the top's end, then of its start, which is counter clockwise
+    /// seen from the player
+    pub fn rungs(&self) -> Vec<[[f32; 3]; 4]> {
+        let count = ((self.height() / RUNG_HEIGHT).round() as usize).max(1);
+        let at = |side: usize, i: usize| {
+            let f = i as f32 / count as f32;
+            [0, 1, 2].map(|k| self.bottom[side][k] + (self.top[side][k] - self.bottom[side][k]) * f)
+        };
+        (0..count).map(|i| [at(1, i), at(1, i + 1), at(0, i + 1), at(0, i)]).collect()
+    }
+}
+
+/// The ladder a mesh stands for: a flat upright face (a quad) that looks at the player on it,
+/// as wide and as tall as the ladder. None for a mesh without a face that looks sideways
+pub fn ladder_of(triangles: &[[[f32; 3]; 3]]) -> Option<SceneLadder> {
+    let mut normal = [0.0f32; 3];
+    for t in triangles {
+        let u = [0, 1, 2].map(|k| t[1][k] - t[0][k]);
+        let v = [0, 1, 2].map(|k| t[2][k] - t[0][k]);
+        let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        normal = [0, 1, 2].map(|k| normal[k] + n[k]);
+    }
+    let len = (normal[0] * normal[0] + normal[2] * normal[2]).sqrt();
+    let whole = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    // lying down or closed (a box's faces cancel out)
+    if len < 1e-6 || len < whole * 0.2 {
+        return None;
+    }
+    let front = [normal[0] / len, 0.0, normal[2] / len];
+    let along = [front[2], 0.0, -front[0]];
+    let points: Vec<[f32; 3]> = triangles.iter().flatten().copied().collect();
+    let side = |p: &[f32; 3]| p[0] * along[0] + p[2] * along[2];
+    let out = |p: &[f32; 3]| p[0] * front[0] + p[2] * front[2];
+    let range = |f: &dyn Fn(&[f32; 3]) -> f32| {
+        points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(f(p)), hi.max(f(p))))
+    };
+    let (s0, s1) = range(&side);
+    let (y0, y1) = range(&|p| p[1]);
+    if s1 - s0 < 0.05 || y1 - y0 < 0.05 {
+        return None;
+    }
+    // a ladder that leans: how far out its lower and its upper half are
+    let middle = (y0 + y1) * 0.5;
+    let mean = |upper: bool| {
+        let (sum, count) = points
+            .iter()
+            .filter(|p| (p[1] >= middle) == upper)
+            .fold((0.0, 0), |(sum, count), p| (sum + out(p), count + 1));
+        sum / count.max(1) as f32
+    };
+    let corner = |s: f32, y: f32, t: f32| [along[0] * s + front[0] * t, y, along[2] * s + front[2] * t];
+    let (low, high) = (mean(false), mean(true));
+    Some(SceneLadder {
+        top: [corner(s0, y1, high), corner(s1, y1, high)],
+        bottom: [corner(s0, y0, low), corner(s1, y0, low)],
+    })
+}
+
 #[derive(Clone, Default)]
 pub struct GeScene {
     pub textures: Vec<GeTexture>,
@@ -186,6 +286,7 @@ pub struct GeScene {
     pub multiplayer_spawns: Vec<SceneSpawn>,
     /// What the player vaults over and climbs onto
     pub edges: Vec<SceneEdge>,
+    pub ladders: Vec<SceneLadder>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -198,6 +299,7 @@ pub struct BuildStats {
     pub sky_triangles: usize,
     pub multiplayer_spawns: usize,
     pub edges: usize,
+    pub ladders: usize,
     pub bounds: Option<Bounds>,
     /// 1 for a level without rooms
     pub zones: usize,
@@ -207,6 +309,81 @@ pub struct BuildStats {
 }
 
 impl GeScene {
+    /// The ladders as they are written: each one's foot put `LADDER_FOOT` above the floor in
+    /// front of it, and what there is to say about the ones that can't be
+    pub fn fitted_ladders(&self) -> (Vec<SceneLadder>, Vec<String>) {
+        let mut warnings = vec![];
+        let mut ladders = vec![];
+        for ladder in &self.ladders {
+            let front = ladder.front();
+            let middle = |ends: &[[f32; 3]; 2]| [0, 1, 2].map(|k| (ends[0][k] + ends[1][k]) * 0.5);
+            let (low, high) = (middle(&ladder.bottom), middle(&ladder.top));
+            let place = format!("the ladder at {:.2} {:.2} {:.2}", high[0], high[1], high[2]);
+            let floor = self.floor_at(low[0] + front[0] * 0.4, low[2] + front[2] * 0.4, Some((low[1] + high[1]) * 0.5));
+            let Some(floor) = floor else {
+                warnings.push(format!("{place} has no floor in front of its foot"));
+                ladders.push(ladder.clone());
+                continue;
+            };
+            // the wall it hangs on looks the other way when the quad was made the wrong way round.
+            // All the way up it: the drawn ladder's own rungs look back at it too, here and there
+            let collision = self.collision_triangles();
+            let faces_a_wall = |at: [f32; 3]| {
+                collision.iter().any(|t| {
+                    let (a, b, c) = (t[0].pos, t[1].pos, t[2].pos);
+                    let u = [0, 1, 2].map(|k| b[k] - a[k]);
+                    let v = [0, 1, 2].map(|k| c[k] - a[k]);
+                    let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+                    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    if len < 1e-9 || (n[0] * front[0] + n[2] * front[2]) / len > -0.5 {
+                        return false;
+                    }
+                    let away = (0..3).map(|k| n[k] / len * (at[k] - a[k])).sum::<f32>();
+                    // within reach of the wall's plane, and in the triangle seen along its normal
+                    let inside = |p: [f32; 3], q: [f32; 3]| {
+                        let e = [0, 1, 2].map(|k| q[k] - p[k]);
+                        let m = [0, 1, 2].map(|k| at[k] - p[k]);
+                        let x = [e[1] * m[2] - e[2] * m[1], e[2] * m[0] - e[0] * m[2], e[0] * m[1] - e[1] * m[0]];
+                        x[0] * n[0] + x[1] * n[1] + x[2] * n[2] >= 0.0
+                    };
+                    away.abs() < 0.3 && inside(a, b) && inside(b, c) && inside(c, a)
+                })
+            };
+            let against_its_wall = [0.13, 0.31, 0.5, 0.69, 0.87]
+                .iter()
+                .all(|f| faces_a_wall([0, 1, 2].map(|k| low[k] + (high[k] - low[k]) * f)));
+            if against_its_wall {
+                warnings.push(format!(
+                    "{place} looks into the wall behind it: its front is the side the player climbs, turn it around"
+                ));
+            }
+            let foot = floor + LADDER_FOOT;
+            if high[1] - foot < RUNG_HEIGHT {
+                warnings.push(format!(
+                    "{place} is {:.2} above the floor in front of it, too low for a ladder: left out",
+                    high[1] - floor
+                ));
+                continue;
+            }
+            if low[1] - foot > 0.25 {
+                warnings.push(format!(
+                    "{place} starts {:.2} above the floor in front of it: too high to walk onto, it is only got onto from its top (the game's own start {LADDER_FOOT} above the floor)",
+                    low[1] - floor
+                ));
+            }
+            // along its own slope, for one that leans
+            let f = (foot - low[1]) / (high[1] - low[1]);
+            let mut fitted = ladder.clone();
+            if f > 0.0 {
+                for side in 0..2 {
+                    fitted.bottom[side] = [0, 1, 2].map(|k| ladder.bottom[side][k] + (ladder.top[side][k] - ladder.bottom[side][k]) * f);
+                }
+            }
+            ladders.push(fitted);
+        }
+        (ladders, warnings)
+    }
+
     /// The floor below (or the nearest above) a point: the highest upward facing triangle of the
     /// collision that a vertical line through it hits
     pub fn floor_at(&self, x: f32, z: f32, below: Option<f32>) -> Option<f32> {
@@ -762,28 +939,48 @@ fn write_placement_node(w: &mut Writer, node: &PlacementNode, entities: &[Placed
     }
 }
 
-/// The edges as an entity's variant 6: the variant word at the entity's +0x40 (a bit for each
-/// variant, the offset to a word for each), that word (the offset to the variant, its number),
-/// and the variant: the number of chains and a pointer to them, the same for polygons (a
-/// ladder's rungs, none here), the number of 16 byte records in each. A chain is a record with
-/// the number of edges and the first point, then a record for each edge: which of its ends
-/// nothing joins (1 the start, 2 the end), its flags, and the point it ends at
-fn write_edges(w: &mut Writer, entity: usize, edges: &[SceneEdge]) {
+/// The edges and ladders as an entity's variant 6: the variant word at the entity's +0x40 (a bit
+/// for each variant, the offset to a word for each), that word (the offset to the variant, its
+/// number), and the variant: the number of chains and a pointer to them, the same for polygons,
+/// the number of 16 byte records in each. A chain is a record with the number of edges and the
+/// first point, then a record for each edge: which of its ends nothing joins (1 the start, 2
+/// the end), its flags, and the point it ends at. A polygon is a record with its number of
+/// corners, a bit for each side nothing joins, its flags and the way a ladder's top runs, then a
+/// record for each corner: the point and two shorts
+fn write_edges(w: &mut Writer, entity: usize, edges: &[SceneEdge], ladders: &[SceneLadder]) {
     const VARIANT_EDGES: u32 = 6;
+    let polygons: usize = ladders.iter().map(|l| l.rungs().len()).sum();
+    let chains = edges.len() + ladders.len();
     let variants = entity + 0x40;
     let word = w.pos();
     w.set_u32(variants, ((word - variants) as u32) << 8 | 1 << VARIANT_EDGES);
     w.u32(4 << 8 | VARIANT_EDGES);
-    w.u32(edges.len() as u32);
+    w.u32(chains as u32);
     let p_chains = w.rel();
-    w.u32(0);
+    w.u32(polygons as u32);
     let p_polygons = w.rel();
-    w.u16(edges.len() as u16 * 2);
-    w.u16(0);
+    w.u16(chains as u16 * 2);
+    w.u16(polygons as u16 * 5);
     w.zeros(12);
-    w.point_here(p_chains);
     w.point_here(p_polygons);
-    for edge in edges {
+    for ladder in ladders {
+        let along = ladder.along();
+        for (i, corners) in ladder.rungs().iter().enumerate() {
+            w.u8(4);
+            // the two sides are open, and the lowest piece's bottom
+            w.u8(if i == 0 { 0x0D } else { 0x05 });
+            w.u16(POLYGON_RUNG);
+            w.f32s(&along);
+            for (corner, (u, v)) in corners.iter().zip([(0, 0), (0x3F, 0), (0x3F, 0x3F), (0, 0x3F)]) {
+                w.f32s(corner);
+                w.u16(u);
+                w.u16(v);
+            }
+        }
+    }
+    w.point_here(p_chains);
+    let tops = ladders.iter().map(|l| SceneEdge { from: l.top[0], to: l.top[1], flags: EDGE_LADDER_TOP });
+    for edge in edges.iter().cloned().chain(tops) {
         // the game's own chains have the first edge's values in the first record as well
         w.u8(1);
         w.u8(3);
@@ -1208,6 +1405,36 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
             edges_by_zone[behind.min(zone_count - 1)].push(edge.clone());
         }
     }
+    // a ladder is the zones' the player is in on it: in front of its foot, its middle and its
+    // top, and behind the top where the climb ends
+    let mut ladders_by_zone: Vec<Vec<SceneLadder>> = vec![vec![]; zone_count];
+    let (ladders, ladder_warnings) = scene.fitted_ladders();
+    stats.ladders = ladders.len();
+    stats.warnings.extend(ladder_warnings);
+    for ladder in &ladders {
+        let Some(zoning) = zoning else {
+            ladders_by_zone[0].push(ladder.clone());
+            continue;
+        };
+        let front = ladder.front();
+        let at = |f: f32, way: f32, up: f32| {
+            let p = [0, 1, 2].map(|k| {
+                let low = (ladder.bottom[0][k] + ladder.bottom[1][k]) * 0.5;
+                let high = (ladder.top[0][k] + ladder.top[1][k]) * 0.5;
+                low + (high - low) * f + front[k] * way
+            });
+            [p[0], p[1] + up, p[2]]
+        };
+        let mut zones: Vec<usize> = [at(0.0, EDGE_ZONE_REACH, 0.5), at(0.5, EDGE_ZONE_REACH, 0.0), at(1.0, EDGE_ZONE_REACH, 0.0), at(1.0, -EDGE_ZONE_REACH, 0.5)]
+            .into_iter()
+            .map(|p| (zoning.zone_at(p) as usize).min(zone_count - 1))
+            .collect();
+        zones.sort();
+        zones.dedup();
+        for zone in zones {
+            ladders_by_zone[zone].push(ladder.clone());
+        }
+    }
 
     // each zone's own entity (0x608), which refers to an empty group (0x603) through the
     // reference pointer before its own: the level's triangles are all placed
@@ -1222,10 +1449,10 @@ pub fn build_geometry_file(scene: &GeScene, file_hash: u32, time: u32) -> (Vec<u
         w.zeros(0xC);
         w.f32(10000.0);
         // the game asks the entity of the zone the player is in for its edges
-        if edges_by_zone[zone].is_empty() {
+        if edges_by_zone[zone].is_empty() && ladders_by_zone[zone].is_empty() {
             w.zeros(0x14);
         } else {
-            write_edges(&mut w, entity, &edges_by_zone[zone]);
+            write_edges(&mut w, entity, &edges_by_zone[zone], &ladders_by_zone[zone]);
         }
         w.set_u32(a_refptrs[zone * 2], w.pos() as u32);
         w.u32(0x603);
@@ -1275,5 +1502,42 @@ mod edge_tests {
             assert!(inwards > 0.0, "{edge:?} is taken away from the quad");
         }
         assert!(rim_edges(&[[a, b, c], [a, c, d]], EDGE_VAULT).is_empty());
+    }
+
+    /// A quad on a wall at x 2 that looks along -x: the top runs so that the player gets off
+    /// into the wall, the pieces are half a unit each and wound to look at the player
+    #[test]
+    fn ladder_faces_the_player() {
+        let (a, b, c, d) = ([2.0, 0.0, 0.0], [2.0, 0.0, 0.4], [2.0, 3.0, 0.4], [2.0, 3.0, 0.0]);
+        let ladder = ladder_of(&[[a, b, c], [a, c, d]]).unwrap();
+        assert_eq!(ladder.front(), [-1.0, 0.0, 0.0]);
+        let (dx, dz) = (ladder.top[1][0] - ladder.top[0][0], ladder.top[1][2] - ladder.top[0][2]);
+        assert!(dz > 0.0 && dx.abs() < 1e-6, "the player gets off towards (dz, 0, -dx): +x");
+        assert!((ladder.height() - 3.0).abs() < 1e-6 && (ladder.width() - 0.4).abs() < 1e-6);
+        let rungs = ladder.rungs();
+        assert_eq!(rungs.len(), 6);
+        assert!((rungs[0][0][1], rungs[5][1][1]) == (0.0, 3.0));
+        for r in &rungs {
+            let u = [0, 1, 2].map(|k| r[1][k] - r[0][k]);
+            let v = [0, 1, 2].map(|k| r[2][k] - r[0][k]);
+            assert!(u[1] * v[2] - u[2] * v[1] < 0.0, "{r:?} looks away from the player");
+        }
+        // turned and leaning: the top still runs across the way the faces look, the foot is
+        // further out than the top
+        let (a, b, c, d) = ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.2, 2.0, 1.2], [1.2, 2.0, 0.2]);
+        let leaning = ladder_of(&[[a, b, c], [a, c, d]]).unwrap();
+        let (front, along) = (leaning.front(), leaning.along());
+        assert!(front[0] < -0.7 && front[2] < -0.7 && (front[0] * along[0] + front[2] * along[2]).abs() < 1e-6);
+        let out = |p: [f32; 3]| p[0] * front[0] + p[2] * front[2];
+        assert!(out(leaning.bottom[0]) > out(leaning.top[0]) + 0.2);
+        for r in leaning.rungs() {
+            let u = [0, 1, 2].map(|k| r[1][k] - r[0][k]);
+            let v = [0, 1, 2].map(|k| r[2][k] - r[0][k]);
+            let n = [u[1] * v[2] - u[2] * v[1], 0.0, u[0] * v[1] - u[1] * v[0]];
+            assert!(n[0] * front[0] + n[2] * front[2] > 0.0, "{r:?} looks away from the player");
+        }
+        // lying flat: no ladder
+        let (e, f, g) = ([0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]);
+        assert!(ladder_of(&[[e, g, f]]).is_none());
     }
 }
