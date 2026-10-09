@@ -1030,6 +1030,62 @@ mod tests {
         }
     }
 
+    /// A room on top of another with a slab between them, a hatch in the upper one's floor and
+    /// its portal in that floor's plane, named from the room above
+    #[test]
+    fn a_floor_with_a_hatch_is_the_room_above() {
+        let mut scene = GeScene::default();
+        let upper_floor = [
+            rectangle([0.0, 3.0, 0.0], [0.0, 0.0, 6.0], [1.0, 0.0, 0.0]),
+            rectangle([2.0, 3.0, 0.0], [0.0, 0.0, 6.0], [4.0, 0.0, 0.0]),
+        ];
+        let rooms: [Vec<[Vec3; 3]>; 2] = [
+            room([0.0, 0.0, 0.0], [6.0, 2.8, 6.0], None, Some([1.0, 2.0])),
+            room([0.0, 3.0, 0.0], [6.0, 6.0, 6.0], None, None)
+                .into_iter()
+                .filter(|t| t.iter().any(|p| p[1] > 3.01))
+                .chain(upper_floor.into_iter().flatten())
+                .collect(),
+        ];
+        for (index, triangles) in rooms.into_iter().enumerate() {
+            scene.rooms.push(format!("Room{index}"));
+            for t in triangles {
+                scene.triangles.push(SceneTriangle {
+                    texture: None,
+                    vertices: t.map(|pos| GeVertex {
+                        pos,
+                        normal: [0.0, 1.0, 0.0],
+                        uv: [0.0; 2],
+                        color: [128; 4],
+                    }),
+                    no_collision: false,
+                    two_sided: false,
+                    lightmap: None,
+                    room: Some(index),
+                });
+            }
+        }
+        scene.portals.push(ScenePortal {
+            name: "Portal_1_0".to_string(),
+            rooms: [1, 0],
+            triangles: rectangle([1.0, 3.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 6.0]).to_vec(),
+        });
+        let zoning = make_zoning(&scene).unwrap();
+        let places = [
+            ([4.0, 3.0, 3.0], 1),
+            ([4.0, 2.9999, 3.0], 1),
+            ([0.5, 3.0, 5.0], 1),
+            ([4.0, 4.0, 3.0], 1),
+            ([1.5, 3.2, 3.0], 1),
+            ([1.5, 2.9, 3.0], 0),
+            ([4.0, 2.5, 3.0], 0),
+            ([4.0, 0.0, 3.0], 0),
+        ];
+        for (place, zone) in places {
+            assert_eq!(zoning.zone_at(place), zone, "at {place:?}");
+        }
+    }
+
     #[test]
     fn portals_face_their_second_room() {
         let zoning = make_zoning(&scene()).unwrap();
