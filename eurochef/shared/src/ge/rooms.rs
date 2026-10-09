@@ -33,6 +33,10 @@ const SURFACE_OFFSETS: [f32; 2] = [0.12, 0.5];
 /// How far a wall's plane is moved behind the wall, so what stands on or against it is in front
 const PLANE_BEHIND: f32 = 0.02;
 const WALL_PLANES: usize = 256;
+/// How near a portal's plane a surface is that counts as lying in it, and how much of it (an
+/// area) there has to be
+const IN_PLANE: f32 = 0.01;
+const IN_PLANE_AREA: f32 = 0.5;
 
 type Vec3 = [f32; 3];
 
@@ -585,6 +589,50 @@ fn wall_planes(triangles: &[[Vec3; 3]]) -> Vec<Cut> {
         .collect()
 }
 
+/// A portal's plane for the tree. The plane goes on past the quad, and a floor or a wall may lie
+/// in it (a hatch in a floor, a doorway in a wall without thickness): what stands on that floor
+/// is right on the plane then, and the side it comes out on is the portal's to say. With a
+/// hatch named from the room above, everybody on the floor around it was in the room below (the
+/// game draws nobody whose room isn't seen). So the plane is moved behind such surfaces, as a
+/// wall's own is: behind a floor (a ceiling alone moves nothing), behind the side most of a
+/// wall's surfaces face
+fn portal_plane(normal: Vec3, corner: Vec3, surfaces: &[[Vec3; 3]]) -> [f32; 4] {
+    let at = dot(normal, corner);
+    // the area lying in the plane that faces the normal's way, and the other way
+    let (mut along, mut against) = (0.0f32, 0.0f32);
+    for t in surfaces {
+        let twice = area_normal(t);
+        let Some(front) = normalised(twice) else {
+            continue;
+        };
+        let facing = dot(front, normal);
+        if facing.abs() < 0.999 || t.iter().any(|p| (dot(normal, *p) - at).abs() > IN_PLANE) {
+            continue;
+        }
+        let area = dot(twice, twice).sqrt() * 0.5;
+        if facing > 0.0 {
+            along += area;
+        } else {
+            against += area;
+        }
+    }
+    let behind_along = if normal[1].abs() > 0.7 {
+        // a floor: what stands on it counts, a ceiling alone moves nothing
+        let up = if normal[1] > 0.0 { along } else { against };
+        (up >= IN_PLANE_AREA).then_some(normal[1] > 0.0)
+    } else if along.max(against) >= IN_PLANE_AREA && along != against {
+        Some(along > against)
+    } else {
+        None
+    };
+    let shift = match behind_along {
+        Some(true) => PLANE_BEHIND,
+        Some(false) => -PLANE_BEHIND,
+        None => 0.0,
+    };
+    [normal[0], normal[1], normal[2], -at + shift]
+}
+
 /// Points on a triangle, evenly spread
 fn points_on(t: &[Vec3; 3], count: usize) -> impl Iterator<Item = Vec3> + '_ {
     (0..count).map(move |i| {
@@ -821,7 +869,7 @@ pub fn make_zoning(scene: &GeScene) -> Option<Zoning> {
     let mut planes: Vec<Cut> = portals
         .iter()
         .map(|(portal, normal)| Cut {
-            plane: [normal[0], normal[1], normal[2], -dot(*normal, portal.corners[0])],
+            plane: portal_plane(*normal, portal.corners[0], &surfaces),
             kind: KIND_PORTAL,
         })
         .collect();
