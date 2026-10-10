@@ -24,6 +24,9 @@ pub struct GeTexture {
     /// How many smaller copies of itself it gets at the most, None: all of them. The game's own
     /// lightmaps have two: further down the parts of a lightmap run into each other
     pub mip_levels: Option<u32>,
+    /// What is drawn with it glows: the game adds a blurred copy of it to the picture, as
+    /// much as its alpha (its lamps', screens' and muzzle flashes' textures are marked so)
+    pub bloom: bool,
 }
 
 impl GeTexture {
@@ -33,6 +36,7 @@ impl GeTexture {
             image: RgbaImage::from_pixel(16, 16, rgba.into()),
             full_alpha: false,
             mip_levels: None,
+            bloom: false,
         }
     }
 

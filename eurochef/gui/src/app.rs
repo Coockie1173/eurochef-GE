@@ -103,6 +103,8 @@ struct NewMapDialog {
     lightmap_mips: u32,
     /// Lightmaps as RGBA8, not compressed
     lightmap_uncompressed: bool,
+    /// Lamps (materials with emission) glow
+    bloom: bool,
     /// A made sky's preset. Empty: the scene's own sky, if it has one
     sky_preset: String,
     /// The made sky as it is set, a preset to begin with
@@ -126,6 +128,7 @@ impl Default for NewMapDialog {
             brightness: 1.0,
             lightmap_mips: 2,
             lightmap_uncompressed: false,
+            bloom: true,
             sky_preset: String::new(),
             sky: SkyOptions::preset("day").expect("the day preset"),
             sky_look: (0.0, 20.0),
@@ -455,6 +458,11 @@ impl EurochefApp {
                     });
                     ui.end_row();
 
+                    ui.label("Lamps");
+                    ui.checkbox(&mut dialog.bloom, "Glow (bloom)")
+                        .on_hover_text("Materials with emission get the game's bloom: a blurred copy of what is drawn with them is added to the picture");
+                    ui.end_row();
+
                     ui.label("Sky");
                     egui::ComboBox::from_id_source("new_map_sky")
                         .selected_text(if dialog.sky_preset.is_empty() { "The scene's own" } else { dialog.sky_preset.as_str() })
@@ -508,6 +516,7 @@ impl EurochefApp {
                     brightness: dialog.brightness,
                     lightmap_mips: dialog.lightmap_mips,
                     lightmap_uncompressed: dialog.lightmap_uncompressed,
+                    bloom: dialog.bloom,
                     ..Default::default()
                 },
                 sky: (!dialog.sky_preset.is_empty()).then(|| dialog.sky.clone()),

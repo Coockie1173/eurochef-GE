@@ -6,6 +6,9 @@ writes a .glb in which each of those objects comes twice: as it is, and as `ligh
 the same triangles with the baked image as their one texture and the lightmap UV map as their
 one UV map. The copies exist only while the file is written.
 
+A lamp (a material with emission) lights the bake and gets no lightmap itself: the game can only
+darken by one, and a lamp gets next to no light of its own. Its faces aren't in the copy.
+
 One file: Preferences > Add-ons > Install from Disk, or open it in the Text Editor and Run
 Script (that lasts until Blender is closed).
 """
@@ -431,6 +434,42 @@ class RemoveLightmaps(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def socket_is_lit(socket):
+    """Whether a colour or strength input lets light through: linked, or not black / zero"""
+    if socket is None:
+        return False
+    if socket.is_linked:
+        return True
+    value = socket.default_value
+    if isinstance(value, (int, float)):
+        return value > 0.0
+    return any(v > 0.0 for v in value[:3])
+
+
+def is_emissive(material):
+    """A lamp: its Principled BSDF has emission, or an Emission shader is wired into it"""
+    if material is None or material.node_tree is None:
+        return False
+    for node in material.node_tree.nodes:
+        if node.type == 'BSDF_PRINCIPLED':
+            # "Emission" until Blender 4.0, black by default; "Emission Color" since, white with
+            # a strength of 0
+            colour = node.inputs.get("Emission Color") or node.inputs.get("Emission")
+            strength = node.inputs.get("Emission Strength")
+            if socket_is_lit(colour) and (strength is None or socket_is_lit(strength)):
+                return True
+        elif node.type == 'EMISSION' and any(output.is_linked for output in node.outputs):
+            if socket_is_lit(node.inputs.get("Color")) and socket_is_lit(node.inputs.get("Strength")):
+                return True
+    return False
+
+
+def lit_faces(mesh):
+    """The faces a lightmap is for: all but the lamps'"""
+    lamps = {i for i, material in enumerate(mesh.materials) if is_emissive(material)}
+    return {p.index for p in mesh.polygons if p.material_index not in lamps}
+
+
 def lightmap_material(image):
     material = bpy.data.materials.new("Lightmap_" + image.name)
     if material.node_tree is None:
@@ -448,11 +487,17 @@ def lightmap_material(image):
 
 
 def lightmap_copy(obj):
-    """The object once more, drawn with its lightmap: one material, the lightmap UV map alone"""
+    """The object once more, drawn with its lightmap: one material, the lightmap UV map alone.
+    None when it is all lamp"""
+    lit = lit_faces(obj.data)
+    if not lit:
+        return None
     copy = obj.copy()
     copy.data = obj.data.copy()
     copy.name = COPY_PREFIX + obj.name
     mesh = copy.data
+    if len(lit) < len(mesh.polygons):
+        keep_faces(mesh, lit)
     while len(mesh.uv_layers) > 1:
         other = next(layer for layer in mesh.uv_layers if layer.name != UV_NAME)
         mesh.uv_layers.remove(other)
@@ -497,7 +542,10 @@ class ExportLevel(bpy.types.Operator, ExportHelper):
         made = []
         try:
             for obj in sources:
-                made.append(lightmap_copy(obj))
+                copy = lightmap_copy(obj)
+                if copy is None:
+                    continue
+                made.append(copy)
                 if self.use_selection:
                     made[-1][0].select_set(True)
 
@@ -521,7 +569,7 @@ class ExportLevel(bpy.types.Operator, ExportHelper):
                 bpy.data.meshes.remove(mesh)
                 bpy.data.materials.remove(material)
 
-        self.report({'INFO'}, "{} with {} lightmap(s)".format(os.path.basename(self.filepath), len(sources)))
+        self.report({'INFO'}, "{} with {} lightmap(s)".format(os.path.basename(self.filepath), len(made)))
         return {'FINISHED'}
 
 

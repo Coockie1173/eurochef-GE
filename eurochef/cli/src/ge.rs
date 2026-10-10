@@ -167,6 +167,10 @@ pub enum GeCommand {
         #[arg(long)]
         lightmap_uncompressed: bool,
 
+        /// No glow around lamps (materials with emission)
+        #[arg(long)]
+        no_bloom: bool,
+
         /// Draw from both sides what the glTF materials say is double sided (Blender: every
         /// material without Backface Culling). Without it only materials named ...twosided or
         /// ...nocull are
@@ -230,6 +234,10 @@ pub enum GeCommand {
         /// Don't compress the lightmaps' textures: no blocks in soft light, eight times the size
         #[arg(long)]
         lightmap_uncompressed: bool,
+
+        /// No glow around lamps (materials with emission)
+        #[arg(long)]
+        no_bloom: bool,
 
         #[arg(long)]
         gltf_double_sided: bool,
@@ -386,6 +394,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             brightness,
             lightmap_mips,
             lightmap_uncompressed,
+            no_bloom,
             gltf_double_sided,
             one_file,
             team0,
@@ -406,6 +415,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     brightness,
                     lightmap_mips,
                     lightmap_uncompressed,
+                    bloom: !no_bloom,
                 },
                 sky: sky.options(false)?,
                 split: !one_file,
@@ -484,6 +494,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             brightness,
             lightmap_mips,
             lightmap_uncompressed,
+            no_bloom,
             gltf_double_sided,
         } => {
             let scene = import_gltf(
@@ -496,6 +507,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     brightness,
                     lightmap_mips,
                     lightmap_uncompressed,
+                    bloom: !no_bloom,
                 },
             )?;
             let time = std::time::SystemTime::now()

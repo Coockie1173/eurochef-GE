@@ -37,6 +37,9 @@
 //! image as its texture and the lightmap's coordinates as its texture coordinates. It isn't
 //! drawn as it is: each of its triangles gives the level's triangle in the same place its
 //! lightmap, which the game draws over it and darkens it by.
+//!
+//! Lamps: a material with emission is its own light. Its triangles are drawn as they are, with
+//! no light from above and no lightmap, which could only darken them.
 
 use std::{collections::HashMap, path::Path};
 
@@ -75,6 +78,8 @@ pub struct ImportOptions {
     /// Keep a lightmap's texture as it is (RGBA8, eight times the size) in place of CMPR, whose
     /// 4 by 4 blocks of two colours show in soft light and where two faces meet in a block
     pub lightmap_uncompressed: bool,
+    /// Lamps (materials with emission) glow: their textures get the game's bloom
+    pub bloom: bool,
 }
 
 impl Default for ImportOptions {
@@ -87,6 +92,7 @@ impl Default for ImportOptions {
             brightness: 1.0,
             lightmap_mips: 2,
             lightmap_uncompressed: false,
+            bloom: true,
         }
     }
 }
@@ -366,9 +372,10 @@ struct Importer<'a> {
     options: &'a ImportOptions,
     scene: GeScene,
     /// The scene's texture for each glTF image that is used
-    image_textures: Vec<Option<usize>>,
+    /// The scene's texture of each image of the file: plain, and the one that glows
+    image_textures: Vec<[Option<usize>; 2]>,
     images: &'a [gltf::image::Data],
-    white: Option<usize>,
+    white: [Option<usize>; 2],
     skipped_primitives: usize,
     /// The rooms as their names tell them apart, in the scene's order
     room_ids: Vec<String>,
@@ -380,6 +387,8 @@ struct Importer<'a> {
     /// The lightmap copies' triangles by their corners' places
     lightmaps: HashMap<[Place; 3], Vec<LightmapTriangle>>,
     lightmapped: usize,
+    /// Triangles of lamps that had a lightmap and are drawn without it
+    lamps_unmapped: usize,
 }
 
 /// What a node is a part of, handed down to the nodes below it
@@ -398,11 +407,12 @@ struct Inherited {
 }
 
 impl Importer<'_> {
-    fn texture_for(&mut self, material: &gltf::Material<'_>) -> anyhow::Result<usize> {
-        let info = material.pbr_metallic_roughness().base_color_texture();
+    /// `bloom`: for a lamp. A texture of its own then, a wall with the same image doesn't glow
+    fn texture_for(&mut self, info: Option<gltf::texture::Info<'_>>, bloom: bool) -> anyhow::Result<usize> {
+        let which = bloom as usize;
         if let Some(info) = info {
             let image = info.texture().source().index();
-            if let Some(existing) = self.image_textures[image] {
+            if let Some(existing) = self.image_textures[image][which] {
                 return Ok(existing);
             }
             let rgba = to_rgba(&self.images[image])
@@ -418,20 +428,21 @@ impl Importer<'_> {
                 image: rgba,
                 full_alpha: false,
                 mip_levels: None,
+                bloom,
             });
             let index = self.scene.textures.len() - 1;
-            self.image_textures[image] = Some(index);
+            self.image_textures[image][which] = Some(index);
             return Ok(index);
         }
 
         // no texture: a white one, the material's colour goes into the vertices
-        if self.white.is_none() {
-            self.scene
-                .textures
-                .push(GeTexture::solid("white", [255, 255, 255, 255]));
-            self.white = Some(self.scene.textures.len() - 1);
+        if self.white[which].is_none() {
+            let mut texture = GeTexture::solid(if bloom { "white_bloom" } else { "white" }, [255, 255, 255, 255]);
+            texture.bloom = bloom;
+            self.scene.textures.push(texture);
+            self.white[which] = Some(self.scene.textures.len() - 1);
         }
-        Ok(self.white.unwrap())
+        Ok(self.white[which].unwrap())
     }
 
     /// The lightmap copies of the scene, read before anything else: a triangle is told whether
@@ -455,7 +466,7 @@ impl Importer<'_> {
                     );
                     continue;
                 }
-                let texture = self.texture_for(&material)?;
+                let texture = self.texture_for(material.pbr_metallic_roughness().base_color_texture(), false)?;
                 self.scene.textures[texture].mip_levels = Some(self.options.lightmap_mips);
                 self.scene.textures[texture].full_alpha = self.options.lightmap_uncompressed;
                 let buffers = self.buffers;
@@ -666,8 +677,19 @@ impl Importer<'_> {
             .unwrap_or(false);
 
         let material = primitive.material();
-        let factor = material.pbr_metallic_roughness().base_color_factor();
-        let texture = self.texture_for(&material)?;
+        let mut factor = material.pbr_metallic_roughness().base_color_factor();
+        let mut picture = material.pbr_metallic_roughness().base_color_texture();
+        // a lamp: what glows is what is seen. Its own picture if the glow has one, the
+        // material's if it has that, the glow's colour alone if neither
+        let glow = material.emissive_factor();
+        let emissive = glow.iter().any(|v| *v > 0.0);
+        if emissive && (material.emissive_texture().is_some() || picture.is_none()) {
+            picture = material.emissive_texture();
+            for k in 0..3 {
+                factor[k] = glow[k].min(1.0);
+            }
+        }
+        let texture = self.texture_for(picture, emissive && self.options.bloom && !is_sky)?;
         let material_name = material.name().map(|n| n.to_lowercase()).unwrap_or_default();
         let no_collision = material_name.contains("nocollide");
         let two_sided = (self.options.gltf_double_sided && material.double_sided())
@@ -679,7 +701,10 @@ impl Importer<'_> {
             let corners = [positions[t[0]], positions[t[1]], positions[t[2]]];
             let flat = face_normal(&corners);
             // baked light is the triangle's light: the importer's own would shade it twice
-            let lightmap = if is_sky { None } else { self.lightmap_of(&corners) };
+            let mut lightmap = if is_sky { None } else { self.lightmap_of(&corners) };
+            if emissive && lightmap.take().is_some() {
+                self.lamps_unmapped += 1;
+            }
             let vertices = [0, 1, 2].map(|k| {
                 let i = t[k];
                 let normal = normals
@@ -697,7 +722,7 @@ impl Importer<'_> {
                         *c = linear_to_srgb(*c);
                     }
                 }
-                if self.options.bake_light && !is_sky && !painted && lightmap.is_none() {
+                if self.options.bake_light && !is_sky && !painted && !emissive && lightmap.is_none() {
                     let light = transform_direction(
                         &[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0; 4]],
                         LIGHT_DIRECTION,
@@ -751,15 +776,16 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         buffers: &buffers,
         options,
         scene: GeScene::default(),
-        image_textures: vec![None; images.len()],
+        image_textures: vec![[None; 2]; images.len()],
         images: &images,
-        white: None,
+        white: [None; 2],
         skipped_primitives: 0,
         room_ids: vec![],
         portals: vec![],
         tops: vec![],
         lightmaps: HashMap::new(),
         lightmapped: 0,
+        lamps_unmapped: 0,
     };
 
     let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
@@ -786,7 +812,13 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
     }
     let unused = importer.lightmaps.values().flatten().filter(|t| !t.used).count();
     if importer.lightmapped > 0 || unused > 0 {
-        tracing::info!("{} triangle(s) with baked light", importer.lightmapped);
+        tracing::info!("{} triangle(s) with baked light", importer.lightmapped - importer.lamps_unmapped);
+    }
+    if importer.lamps_unmapped > 0 {
+        tracing::info!(
+            "{} triangle(s) of lamps (materials with emission) had baked light, drawn without it",
+            importer.lamps_unmapped
+        );
     }
     if unused > 0 {
         tracing::warn!(

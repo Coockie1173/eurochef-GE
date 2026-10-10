@@ -48,6 +48,9 @@ const HC_LOCAL_ENTITY: u32 = 0x82000000;
 const HC_LOCAL_TEXTURE: u32 = 0x86000000;
 const HC_LOCAL_MATERIAL: u32 = 0xA5000000;
 const TEXTURE_FLAGS: u32 = 0x04000000;
+/// A texture's flag for what glows: while it is drawn the picture's alpha is written too, and
+/// the bloom (fn_802B4F00) is the picture times that alpha, blurred and added
+const TEXTURE_BLOOM: u32 = 0x8000;
 const PLACEMENT_COLLIDES: u16 = 9;
 /// A placement's flags in a zone's tree when no body is tested against it
 const PLACEMENT_LISTED: u8 = 1;
@@ -1205,7 +1208,7 @@ fn build_map_file(
         w.u16(width as u16);
         w.u16(height as u16);
         w.u32(0); // game flags
-        w.u32(TEXTURE_FLAGS);
+        w.u32(if texture.bloom { TEXTURE_FLAGS | TEXTURE_BLOOM } else { TEXTURE_FLAGS });
     }
 
     w.point_here(p_sections);

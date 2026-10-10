@@ -217,7 +217,7 @@ pub fn make_sky(options: &SkyOptions, level: &Bounds) -> anyhow::Result<(Vec<Sce
     let radius = options.radius.unwrap_or_else(|| if size > 0.0 { (size * options.margin).max(50.0) } else { 300.0 });
 
     let texture = match &options.texture {
-        Some(path) => Some(GeTexture { name: "sky_panorama".to_string(), image: load_panorama(path)?, full_alpha: false, mip_levels: None }),
+        Some(path) => Some(GeTexture { name: "sky_panorama".to_string(), image: load_panorama(path)?, full_alpha: false, mip_levels: None, bloom: false }),
         None => None,
     };
     let noise = Noise::new(options.seed);

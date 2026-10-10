@@ -68,6 +68,7 @@ Read that output, by the way. If it says `0 ladders` and you made a ladder, you 
 | `--linear-colours` | Keep the colours as glTF has them (darker) |
 | `--lightmap-mips N` | How many smaller copies (mip levels) a lightmap's texture gets, 0 for none. 2 like the game's own (see Lightmaps) |
 | `--lightmap-uncompressed` | Lightmaps as RGBA8 in place of CMPR: no blocks in soft light, eight times the size |
+| `--no-bloom` | No glow around lamps (materials with emission, see Lightmaps) |
 | `--gltf-double-sided` | Believe glTF's "double sided" flag (see Colours and sides) |
 | `--one-file` | One `mt_NAME.edb` with the geometry in it, no gamemodes |
 | `--sky PRESET` | Make a sky around the level (see The sky) |
@@ -132,6 +133,8 @@ Then `ge new-map level.glb` as always. It says how many triangles got baked ligh
 Things worth knowing:
 - The light **multiplies**. White in the lightmap leaves the level as it is, darker darkens, nothing gets brighter than it was. A scene that is brighter than 1 in Blender just bakes white.
 - So a dim scene makes a dark level. The panel's *Exposure* multiplies the bake (2 is twice the light, white at the most), and `--brightness` still brightens everything from the other side, the vertex colours.
+- **Lamps.** A material with emission (*Emission Strength* above 0 in Blender) is a lamp: it lights the bake, and in the game it is drawn as it is, with no lightmap over it and no light from above. A lightmap could only darken it, and a lamp gets next to no light of its own, so it would bake near black. If the emission has a texture that is the one drawn, otherwise the base colour's. For a glowing part of a wall, give those faces a material of their own with emission.
+- **Lamps glow.** A lamp's texture gets the game's bloom, the same its own lamps, screens and muzzle flashes have: a blurred copy of what is drawn with it is added to the picture, so it bleeds over its edges and a pale lamp goes white. It is all or nothing for now, and strong on a large face: keep lamps small, or make the texture darker. `--no-bloom` turns it off for the level.
 - A lightmapped object doesn't get the importer's light from above, the baked light is its light. Its vertex colours still count, and so does `--brightness`.
 - Far away the game draws a texture's smaller copies, and in those a lightmap's islands run into each other and into the black between them: dark lines along edges. So a lightmap only gets two smaller copies, as the game's own do. `--lightmap-mips 0` gives it none (no lines at all, a bit of shimmer far away), a larger *Margin* in the bake helps too.
 - Seams. The importer fills every texel of a lightmap that no triangle uses with the colour of the nearest one that is used, so the black between the islands never gets drawn. What it can't fix is two faces that sit side by side in the image with nothing between them: *Smart UV Project* has far fewer of those than *Lightmap Pack* (walls stay in one piece), a larger *Island Margin* keeps them apart, *Denoise* and more *Samples* make the faces agree where they meet, and `--lightmap-uncompressed` gets rid of the compression's blocks if you can spare the size.
