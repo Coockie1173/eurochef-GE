@@ -302,6 +302,16 @@ pub enum GeCommand {
         /// List the base gun's parts and leave it at that
         #[arg(long)]
         parts: bool,
+
+        /// Write the base gun as a rigged glTF scene to start a gun from: one mesh, a bone
+        /// Part_N for each part where the model script puts it, each part's triangles weighted
+        /// to its bone, the scripts' keyframes as animations. Then leave it at that
+        #[arg(long, value_name = "GLTF")]
+        export: Option<String>,
+
+        /// With --export: leave the animations out
+        #[arg(long)]
+        no_animations: bool,
     },
     /// Write the triggers of a file's map as a glTF scene of named nodes (spawn, mp_spawn_...,
     /// trigger_NNN_TYPE), the names `new-map` reads
@@ -613,13 +623,19 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        GeCommand::Weapon { gltf, base, from, output, hash, brightness, parts } => {
+        GeCommand::Weapon { gltf, base, from, output, hash, brightness, parts, export, no_animations } => {
             let Some((name, id, scripts)) = base_gun(&base) else {
                 let names: Vec<&str> = BASE_GUNS.iter().map(|g| g.0).collect();
                 anyhow::bail!("no gun {base}, the base is one of: {}", names.join(", "));
             };
             let data = std::fs::read(&from).with_context(|| format!("couldn't read {from}"))?;
             let (blocks, gun_parts) = read_base(&data, scripts)?;
+            if let Some(export) = export {
+                let text = eurochef_shared::ge::weapon_rig::export_rig(&data, &blocks, &gun_parts, !no_animations)?;
+                std::fs::write(&export, text).with_context(|| format!("couldn't write {export}"))?;
+                println!("{export}: {name}'s {} part(s), rigged", gun_parts.len());
+                return Ok(());
+            }
             if parts || gltf.is_none() {
                 println!("{name} ({id:08X}): {} part(s) in {} script(s)", gun_parts.len(), blocks.len());
                 for (i, part) in gun_parts.iter().enumerate() {
