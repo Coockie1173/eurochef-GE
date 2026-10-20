@@ -11,6 +11,7 @@ use eurochef_shared::ge::{
     project::{new_map_from_gltf, NewMapOptions},
     sky::{self, SkyOptions},
     triggers::{read_triggers, write_triggers, GeTrigger},
+    weapon::{base_gun, build_weapon, locator_name, read_base, BASE_GUNS},
 };
 
 /// A made sky: a sphere around the level with the sky painted on it
@@ -270,6 +271,37 @@ pub enum GeCommand {
     Triggers {
         /// .edb file to read
         filename: String,
+    },
+    /// Make a gun for a custom weapon of the port's mods/weapons: its parts from a glTF scene
+    /// (nodes named Part_N, or Body for part 0, or a mesh rigged to bones Part_N), its scripts copied from the base gun's in
+    /// o_guns.edb, so it moves as the base does
+    Weapon {
+        /// .gltf or .glb file with the gun (left out with --parts)
+        gltf: Option<String>,
+
+        /// The game's weapon it is made from, as the weapon's file names it (AK-47, P99, ...)
+        #[arg(short, long)]
+        base: String,
+
+        /// The game's o_guns.edb
+        #[arg(short, long)]
+        from: String,
+
+        /// The .edb file to write (into mods/weapons, next to the weapon's .txt)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// The file's hash, one no other file has
+        #[arg(long, default_value = "0x0109F000", value_parser = clap_num::maybe_hex::<u32>)]
+        hash: u32,
+
+        /// Every vertex colour times this. The game's guns are near white, its levels half that
+        #[arg(long, default_value_t = 1.75)]
+        brightness: f32,
+
+        /// List the base gun's parts and leave it at that
+        #[arg(long)]
+        parts: bool,
     },
     /// Write the triggers of a file's map as a glTF scene of named nodes (spawn, mp_spawn_...,
     /// trigger_NNN_TYPE), the names `new-map` reads
@@ -579,6 +611,28 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             for (i, t) in set.triggers.iter().enumerate() {
                 println!("{}", describe(i, t));
             }
+            Ok(())
+        }
+        GeCommand::Weapon { gltf, base, from, output, hash, brightness, parts } => {
+            let Some((name, id, scripts)) = base_gun(&base) else {
+                let names: Vec<&str> = BASE_GUNS.iter().map(|g| g.0).collect();
+                anyhow::bail!("no gun {base}, the base is one of: {}", names.join(", "));
+            };
+            let data = std::fs::read(&from).with_context(|| format!("couldn't read {from}"))?;
+            let (blocks, gun_parts) = read_base(&data, scripts)?;
+            if parts || gltf.is_none() {
+                println!("{name} ({id:08X}): {} part(s) in {} script(s)", gun_parts.len(), blocks.len());
+                for (i, part) in gun_parts.iter().enumerate() {
+                    println!("  Part_{i}: entity {:3} ({:08X}) on {:08X} {}", part.entity, part.entity_hash, part.locator, locator_name(part.locator));
+                }
+                return Ok(());
+            }
+            let gltf = gltf.unwrap();
+            let output = output.context("--output: the .edb to write")?;
+            let made = build_weapon(&gltf, &base, &data, brightness, hash)?;
+            std::fs::write(&output, &made.file).with_context(|| format!("couldn't write {output}"))?;
+            let given: Vec<String> = made.given.iter().map(|i| format!("Part_{i}")).collect();
+            println!("{output}: {name}'s {} script(s), {} of its {} part(s) from the scene ({}), {} texture(s)", made.scripts, given.len(), made.parts, given.join(" "), made.textures);
             Ok(())
         }
         GeCommand::ExportTriggers { filename, output } => {

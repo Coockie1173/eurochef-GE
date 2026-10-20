@@ -32,6 +32,18 @@ pub fn execute_command(
     dont_embed_textures: bool,
     remove_transparent: bool,
 ) -> anyhow::Result<()> {
+    execute_command_for(filename, platform, output_folder, dont_embed_textures, remove_transparent, None)
+}
+
+/// The same, for the entities with these hashes only (all of them with None)
+pub fn execute_command_for(
+    filename: String,
+    platform: Option<PlatformArg>,
+    output_folder: Option<String>,
+    dont_embed_textures: bool,
+    remove_transparent: bool,
+    only: Option<&[u32]>,
+) -> anyhow::Result<()> {
     let output_folder = output_folder.unwrap_or(format!(
         "./entities/{}/",
         Path::new(&filename).file_name().unwrap().to_string_lossy()
@@ -139,11 +151,12 @@ pub fn execute_command(
     let mut entity_offsets: Vec<(u64, String)> = header
         .entity_list
         .iter()
+        .filter(|e| only.map_or(true, |only| only.contains(&e.common.hashcode)))
         .map(|e| (e.common.address as u64, format!("{:x}", e.common.hashcode)))
         .collect();
 
     // Find entities in refpointers
-    for (i, r) in header.refpointer_list.iter().enumerate() {
+    for (i, r) in header.refpointer_list.iter().enumerate().filter(|_| only.is_none()) {
         edb.seek(std::io::SeekFrom::Start(r.address as u64))?;
         let etype = edb.read_type::<u32>(edb.endian)?;
 
