@@ -86,8 +86,41 @@ pub struct EurochefApp {
     current_source: Option<(String, Arc<Vec<u8>>)>,
 
     new_map: Option<NewMapDialog>,
+    new_weapon: Option<NewWeaponDialog>,
     /// --save-triggers: write the loaded file's triggers back to this file (for testing)
     save_triggers_to: Option<String>,
+}
+
+/// New GoldenEye 007 weapon: a custom weapon's gun (mods/weapons) from a glTF scene and a base
+/// gun's scripts
+struct NewWeaponDialog {
+    base: String,
+    /// The game's o_guns.edb
+    guns: String,
+    gltf: String,
+    output: String,
+    brightness: f32,
+    hash: u32,
+    /// Also write the weapon's .txt next to the .edb, with this name
+    write_txt: bool,
+    name: String,
+    status: String,
+}
+
+impl Default for NewWeaponDialog {
+    fn default() -> Self {
+        Self {
+            base: "AK-47".to_string(),
+            guns: String::new(),
+            gltf: String::new(),
+            output: "mods/weapons/custom.edb".to_string(),
+            brightness: 1.75,
+            hash: 0x0109F000,
+            write_txt: true,
+            name: "Custom".to_string(),
+            status: String::new(),
+        }
+    }
 }
 
 /// File > New GoldenEye 007 map: a level made from a glTF scene
@@ -203,6 +236,7 @@ impl EurochefApp {
             pending_path: String::new(),
             current_source: None,
             new_map: None,
+            new_weapon: None,
             save_triggers_to: None,
         };
 
@@ -517,6 +551,7 @@ impl EurochefApp {
                     lightmap_mips: dialog.lightmap_mips,
                     lightmap_uncompressed: dialog.lightmap_uncompressed,
                     bloom: dialog.bloom,
+                    parts: false,
                     ..Default::default()
                 },
                 sky: (!dialog.sky_preset.is_empty()).then(|| dialog.sky.clone()),
@@ -562,6 +597,154 @@ impl EurochefApp {
         }
         if !open {
             self.new_map = None;
+        }
+    }
+
+    fn show_new_weapon(&mut self, ctx: &egui::Context) {
+        use eurochef_shared::ge::{weapon, weapon_rig};
+        let Some(dialog) = self.new_weapon.as_mut() else {
+            return;
+        };
+        let mut open = true;
+        let (mut export, mut build) = (false, false);
+        egui::Window::new("New GoldenEye 007 weapon")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("A custom weapon's gun (mods/weapons/NAME.edb) is made from a glTF scene and a base gun's scripts, so it moves as the base does. Export the base's rig to start from: one mesh, a bone Part_N for each part, each part a vertex group of its bone's name.");
+                ui.add_space(4.0);
+                egui::Grid::new("new_weapon").num_columns(3).show(ui, |ui| {
+                    ui.label("Base gun");
+                    egui::ComboBox::from_id_source("new_weapon_base").selected_text(dialog.base.as_str()).show_ui(ui, |ui| {
+                        for (name, _, _) in weapon::BASE_GUNS {
+                            ui.selectable_value(&mut dialog.base, name.to_string(), *name);
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("o_guns.edb");
+                    ui.add(egui::TextEdit::singleline(&mut dialog.guns).desired_width(320.0).hint_text("the game's o_guns.edb (0109000F)"));
+                    if ui.button("Browse").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("EDB", &["edb"]).pick_file() {
+                            dialog.guns = path.to_string_lossy().to_string();
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Scene");
+                    ui.add(egui::TextEdit::singleline(&mut dialog.gltf).desired_width(320.0).hint_text(".gltf or .glb"));
+                    if ui.button("Browse").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("glTF", &["gltf", "glb"]).pick_file() {
+                            dialog.gltf = path.to_string_lossy().to_string();
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Gun file");
+                    ui.add(egui::TextEdit::singleline(&mut dialog.output).desired_width(320.0).hint_text("mods/weapons/NAME.edb"));
+                    if ui.button("Browse").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("EDB", &["edb"]).set_file_name("custom.edb").save_file() {
+                            dialog.output = path.to_string_lossy().to_string();
+                        }
+                    }
+                    ui.end_row();
+
+                    ui.label("Brightness");
+                    ui.add(egui::Slider::new(&mut dialog.brightness, 0.25..=4.0))
+                        .on_hover_text("Every vertex colour times this. The game's guns are near white, its levels half that");
+                    ui.end_row();
+
+                    ui.label("File hash");
+                    ui.add(egui::DragValue::new(&mut dialog.hash).hexadecimal(8, false, true))
+                        .on_hover_text("One no other file has: a weapon of its own each");
+                    ui.end_row();
+
+                    ui.label("Weapon");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut dialog.write_txt, "Write its .txt too, named");
+                        ui.add_enabled(dialog.write_txt, egui::TextEdit::singleline(&mut dialog.name).desired_width(160.0));
+                    });
+                    ui.end_row();
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    export = ui
+                        .add_enabled(!dialog.guns.is_empty(), egui::Button::new("Export base rig"))
+                        .on_hover_text("Write the base gun as a rigged glTF scene (with its scripts as animations) to the scene's path, or one you pick")
+                        .clicked();
+                    build = ui
+                        .add_enabled(!dialog.guns.is_empty() && !dialog.gltf.is_empty() && !dialog.output.is_empty(), egui::Button::new("Build"))
+                        .clicked();
+                });
+                if !dialog.status.is_empty() {
+                    ui.label(&dialog.status);
+                }
+            });
+
+        if export {
+            let path = if dialog.gltf.is_empty() {
+                rfd::FileDialog::new()
+                    .add_filter("glTF", &["gltf"])
+                    .set_file_name(format!("{}.gltf", dialog.base.to_lowercase().replace(' ', "_")))
+                    .save_file()
+                    .map(|p| p.to_string_lossy().to_string())
+            } else {
+                Some(dialog.gltf.clone())
+            };
+            if let Some(path) = path {
+                let made = (|| -> anyhow::Result<usize> {
+                    let (_, _, scripts) = weapon::base_gun(&dialog.base).ok_or_else(|| anyhow::anyhow!("no gun {}", dialog.base))?;
+                    let data = std::fs::read(&dialog.guns)?;
+                    let (blocks, parts) = weapon::read_base(&data, scripts)?;
+                    std::fs::write(&path, weapon_rig::export_rig(&data, &blocks, &parts, true)?)?;
+                    Ok(parts.len())
+                })();
+                dialog.status = match made {
+                    Ok(parts) => {
+                        dialog.gltf = path.clone();
+                        format!("Wrote {path}: {}'s {parts} part(s), rigged. Edit it, then Build from it.", dialog.base)
+                    }
+                    Err(e) => format!("Not exported: {e:#}"),
+                };
+            }
+        }
+        if build {
+            let made = (|| -> anyhow::Result<weapon::BuiltWeapon> {
+                let data = std::fs::read(&dialog.guns)?;
+                let made = weapon::build_weapon(&dialog.gltf, &dialog.base, &data, dialog.brightness, dialog.hash)?;
+                let output = std::path::Path::new(&dialog.output);
+                if let Some(folder) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(folder)?;
+                }
+                std::fs::write(output, &made.file)?;
+                if dialog.write_txt {
+                    let model = output.file_name().unwrap_or_default().to_string_lossy();
+                    let text = format!("name = {}\nbase = {}\nmodel = {model}\n", dialog.name, made.base);
+                    std::fs::write(output.with_extension("txt"), text)?;
+                }
+                Ok(made)
+            })();
+            dialog.status = match made {
+                Ok(made) => {
+                    let given: Vec<String> = made.given.iter().map(|i| format!("Part_{i}")).collect();
+                    format!(
+                        "Wrote {}{}: {}'s {} script(s), {} of its {} part(s) from the scene ({}), {} texture(s).",
+                        dialog.output,
+                        if dialog.write_txt { " and its .txt" } else { "" },
+                        made.base,
+                        made.scripts,
+                        given.len(),
+                        made.parts,
+                        given.join(" "),
+                        made.textures
+                    )
+                }
+                Err(e) => format!("Not built: {e:#}"),
+            };
+        }
+        if !open {
+            self.new_weapon = None;
         }
     }
 
@@ -1000,6 +1183,7 @@ impl eframe::App for EurochefApp {
 
         self.update_screenshot(ctx);
         self.show_new_map(ctx);
+        self.show_new_weapon(ctx);
 
         let Self {
             state,
@@ -1090,6 +1274,10 @@ impl eframe::App for EurochefApp {
 
                 if ui.button("New GoldenEye 007 map").clicked() {
                     self.new_map.get_or_insert_with(NewMapDialog::default);
+                }
+
+                if ui.button("New GoldenEye 007 weapon").clicked() {
+                    self.new_weapon.get_or_insert_with(NewWeaponDialog::default);
                 }
 
                 if ui.button("Profiler").clicked() {
