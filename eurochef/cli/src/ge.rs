@@ -416,6 +416,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     lightmap_mips,
                     lightmap_uncompressed,
                     bloom: !no_bloom,
+                    parts: false,
                 },
                 sky: sky.options(false)?,
                 split: !one_file,
@@ -508,6 +509,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     lightmap_mips,
                     lightmap_uncompressed,
                     bloom: !no_bloom,
+                    parts: false,
                 },
             )?;
             let time = std::time::SystemTime::now()

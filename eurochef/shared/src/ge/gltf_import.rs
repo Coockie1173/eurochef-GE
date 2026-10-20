@@ -80,6 +80,10 @@ pub struct ImportOptions {
     pub lightmap_uncompressed: bool,
     /// Lamps (materials with emission) glow: their textures get the game's bloom
     pub bloom: bool,
+    /// A gun's parts in place of rooms: a node named `Part_N` (or `Body`, part 0) holds part N
+    /// with everything below it, in the scene's `rooms` as its number. A skinned mesh's
+    /// triangles are the part of the joint (bone `Part_N...`) they are weighted to, in its space
+    pub parts: bool,
 }
 
 impl Default for ImportOptions {
@@ -93,6 +97,7 @@ impl Default for ImportOptions {
             lightmap_mips: 2,
             lightmap_uncompressed: false,
             bloom: true,
+            parts: false,
         }
     }
 }
@@ -288,6 +293,20 @@ fn room_of_name(name: Option<&str>) -> Option<String> {
     (!id.is_empty()).then(|| room_id(id))
 }
 
+/// The gun part a node named `Part_N...` (`Part3`, `part_03`, `Part_3_slide`) or `Body...` holds:
+/// its number
+fn part_of_name(name: Option<&str>) -> Option<String> {
+    let name = without_copy_number(name?);
+    if name.get(..4)?.eq_ignore_ascii_case("body") {
+        return Some("0".to_string());
+    }
+    if !name.get(..4)?.eq_ignore_ascii_case("part") {
+        return None;
+    }
+    let id = name[4..].trim_start_matches(['_', ' ', '-']).split(['_', ' ', '-']).next()?;
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then(|| room_id(id))
+}
+
 /// The two rooms a node named `Portal_XX_YY...` joins
 fn portal_of_name(name: Option<&str>) -> Option<[String; 2]> {
     let name = without_copy_number(name?);
@@ -389,6 +408,13 @@ struct Importer<'a> {
     lightmapped: usize,
     /// Triangles of lamps that had a lightmap and are drawn without it
     lamps_unmapped: usize,
+}
+
+/// A gun's rig: for each joint, what takes a vertex into its space and the part it is
+#[derive(Default)]
+struct SkinParts {
+    inverse: Vec<[[f32; 4]; 4]>,
+    rooms: Vec<Option<usize>>,
 }
 
 /// What a node is a part of, handed down to the nodes below it
@@ -547,15 +573,17 @@ impl Importer<'_> {
                 let name = node.name().or(mesh_name.as_deref()).unwrap_or("portal").to_string();
                 self.portals.push((name, rooms, vec![]));
                 part.portal = Some(self.portals.len() - 1);
-            } else if let Some(id) = room_of_name(node.name()).or_else(|| room_of_name(mesh_name.as_deref())) {
-                part.room = Some(match self.room_ids.iter().position(|r| *r == id) {
-                    Some(room) => room,
-                    None => {
-                        self.room_ids.push(id);
-                        self.scene.rooms.push(without_copy_number(node.name().or(mesh_name.as_deref()).unwrap_or("room")).to_string());
-                        self.room_ids.len() - 1
-                    }
-                });
+            } else if let Some(id) = if self.options.parts {
+                part_of_name(node.name()).or_else(|| part_of_name(mesh_name.as_deref()))
+            } else {
+                room_of_name(node.name()).or_else(|| room_of_name(mesh_name.as_deref()))
+            } {
+                let shown = if self.options.parts {
+                    id.clone()
+                } else {
+                    without_copy_number(node.name().or(mesh_name.as_deref()).unwrap_or("room")).to_string()
+                };
+                part.room = Some(self.room_for(id, shown));
             }
         }
 
@@ -595,12 +623,13 @@ impl Importer<'_> {
             let mut part = part;
             part.added |= is_added_collision_name(mesh.name());
             part.collision |= part.added || is_collision_name(mesh.name());
+            let skin = if self.options.parts { node.skin().map(|s| self.skin_parts(&s)) } else { None };
             for primitive in mesh.primitives() {
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
                     self.skipped_primitives += 1;
                     continue;
                 }
-                self.primitive(&primitive, &matrix, part)?;
+                self.primitive(&primitive, &matrix, part, skin.as_ref())?;
             }
         }
 
@@ -610,11 +639,40 @@ impl Importer<'_> {
         Ok(())
     }
 
+    /// A room for the rooms' (or parts') id, the one it already has or a new one
+    fn room_for(&mut self, id: String, shown: String) -> usize {
+        match self.room_ids.iter().position(|r| *r == id) {
+            Some(room) => room,
+            None => {
+                self.room_ids.push(id);
+                self.scene.rooms.push(shown);
+                self.room_ids.len() - 1
+            }
+        }
+    }
+
+    /// A gun's rig: each joint's inverse bind matrix (what takes a vertex into the bone's own
+    /// space) and the part its name says it is
+    fn skin_parts(&mut self, skin: &gltf::Skin<'_>) -> SkinParts {
+        let buffers = self.buffers;
+        let reader = skin.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
+        let inverse: Vec<[[f32; 4]; 4]> = reader.read_inverse_bind_matrices().map(|m| m.collect()).unwrap_or_default();
+        let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let mut parts = SkinParts::default();
+        for (i, joint) in skin.joints().enumerate() {
+            parts.inverse.push(inverse.get(i).copied().unwrap_or(identity));
+            let room = part_of_name(joint.name()).map(|id| self.room_for(id.clone(), id));
+            parts.rooms.push(room);
+        }
+        parts
+    }
+
     fn primitive(
         &mut self,
         primitive: &gltf::Primitive<'_>,
         matrix: &[[f32; 4]; 4],
         part: Inherited,
+        skin: Option<&SkinParts>,
     ) -> anyhow::Result<()> {
         let buffers = self.buffers;
         let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
@@ -622,14 +680,43 @@ impl Importer<'_> {
             self.skipped_primitives += 1;
             return Ok(());
         };
+        // a rigged gun: each vertex is its heaviest joint's, in that joint's own space (the
+        // mesh node's place doesn't count for a skinned mesh)
+        let joints: Option<Vec<usize>> = skin.and_then(|skin| {
+            let joints: Vec<[u16; 4]> = reader.read_joints(0)?.into_u16().collect();
+            let weights: Vec<[f32; 4]> = reader.read_weights(0)?.into_f32().collect();
+            Some(
+                joints
+                    .iter()
+                    .zip(&weights)
+                    .map(|(j, w)| {
+                        let heaviest = (0..4).fold(0, |best, k| if w[k] > w[best] { k } else { best });
+                        (j[heaviest] as usize).min(skin.inverse.len().saturating_sub(1))
+                    })
+                    .collect(),
+            )
+        });
+        let vertex_matrix = |i: usize| match (&joints, skin) {
+            (Some(joints), Some(skin)) => joints.get(i).and_then(|j| skin.inverse.get(*j)).unwrap_or(matrix),
+            _ => matrix,
+        };
         let scale = self.options.scale;
         // mirrored: x is negated here, the triangles are turned around below
-        let positions: Vec<[f32; 3]> = positions
-            .map(|p| {
-                let p = transform_point(matrix, p);
-                [-p[0] * scale, p[1] * scale, p[2] * scale]
-            })
-            .collect();
+        let to_scene = |m: &[[f32; 4]; 4], p: [f32; 3]| {
+            let p = transform_point(m, p);
+            [-p[0] * scale, p[1] * scale, p[2] * scale]
+        };
+        let raw: Vec<[f32; 3]> = positions.collect();
+        let positions: Vec<[f32; 3]> = raw.iter().enumerate().map(|(i, p)| to_scene(vertex_matrix(i), *p)).collect();
+        // a triangle is the part most of its corners are (the second's when the last two agree,
+        // else the first's), and all its corners go into that part's joint's space: a corner
+        // weighted to another joint (where the slide meets the frame) would be off by the
+        // difference between the two, a sliver out of the gun
+        let chosen = |t: &[usize; 3]| -> Option<usize> {
+            let (joints, skin) = (joints.as_ref()?, skin?);
+            let room = |k: usize| joints.get(t[k]).and_then(|j| skin.rooms.get(*j)).copied().flatten();
+            Some(if room(1) == room(2) { 1 } else { 0 })
+        };
         let indices: Vec<u32> = match reader.read_indices() {
             Some(indices) => indices.into_u32().collect(),
             None => (0..positions.len() as u32).collect(),
@@ -660,13 +747,7 @@ impl Importer<'_> {
             return Ok(());
         }
 
-        let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| {
-            n.map(|n| {
-                let n = transform_direction(matrix, n);
-                [-n[0], n[1], n[2]]
-            })
-            .collect()
-        });
+        let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
         let uvs: Option<Vec<[f32; 2]>> = reader.read_tex_coords(0).map(|t| t.into_f32().collect());
         let colours: Option<Vec<[f32; 4]>> = reader.read_colors(0).map(|c| c.into_rgba_f32().collect());
         // vertex colours that aren't all white are the level's light as it was painted: the
@@ -698,7 +779,8 @@ impl Importer<'_> {
                 .any(|tag| material_name.contains(tag));
 
         for t in triangles {
-            let corners = [positions[t[0]], positions[t[1]], positions[t[2]]];
+            let corner_matrix = |k: usize| vertex_matrix(chosen(&t).map_or(t[k], |c| t[c]));
+            let corners = [0, 1, 2].map(|k| to_scene(corner_matrix(k), raw[t[k]]));
             let flat = face_normal(&corners);
             // baked light is the triangle's light: the importer's own would shade it twice
             let mut lightmap = if is_sky { None } else { self.lightmap_of(&corners) };
@@ -710,7 +792,10 @@ impl Importer<'_> {
                 let normal = normals
                     .as_ref()
                     .and_then(|n| n.get(i))
-                    .copied()
+                    .map(|n| {
+                        let n = transform_direction(corner_matrix(k), *n);
+                        [-n[0], n[1], n[2]]
+                    })
                     .filter(|n| n.iter().all(|v| v.is_finite()))
                     .unwrap_or(flat);
                 let mut colour = colours.as_ref().and_then(|c| c.get(i)).copied().unwrap_or([1.0; 4]);
@@ -752,7 +837,14 @@ impl Importer<'_> {
                 texture: Some(texture),
                 vertices,
                 no_collision: no_collision || is_sky,
-                room: part.room,
+                room: match (&joints, skin) {
+                    // the part most of its corners are
+                    (Some(joints), Some(skin)) => {
+                        let room = |k: usize| joints.get(t[k]).and_then(|j| skin.rooms.get(*j)).copied().flatten();
+                        if room(1) == room(2) { room(1) } else { room(0) }
+                    }
+                    _ => part.room,
+                },
                 two_sided,
                 lightmap,
             };
