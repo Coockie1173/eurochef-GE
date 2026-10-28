@@ -147,6 +147,12 @@ pub fn read_entity(
                     let start_index = new_indices.len();
                     for cv in converted_indices.into_iter() {
                         if index_count != 0 {
+                            // joined with zero-area triangles, the next strip starting on an even
+                            // index so its faces keep their winding
+                            if index_count % 2 != 0 {
+                                new_indices.push(vertex_data.len() as u32 - 1 - vertex_offset);
+                                index_count += 1;
+                            }
                             new_indices.push(vertex_data.len() as u32 - 1 - vertex_offset);
                             new_indices.push(vertex_data.len() as u32 - vertex_offset);
                             index_count += 2;
@@ -195,7 +201,7 @@ pub fn read_entity(
 
                             vertex_data.push(UXVertex {
                                 pos: original_vert.pos,
-                                norm: [0f32, 0f32, 0f32],
+                                norm: original_vert.norm,
                                 uv: [uv.0 as f32 / uv_dividend, uv.1 as f32 / uv_dividend],
                                 color: [
                                     color[0] as f32 / 255.0,
@@ -246,32 +252,33 @@ pub fn read_entity(
                 };
 
                 if convert_strips {
-                    strips.push(TriStrip {
-                        start_index: indices.len() as u32,
-                        index_count: t.tricount * 3,
-                        texture_index: texture_index as u32,
-                        transparency: t.trans_type,
-                        flags: t.flags,
-                        tri_count: t.tricount,
-                    });
-
+                    let start_index = indices.len() as u32;
                     for i in
                         (index_offset_local as usize)..(index_offset_local + t.tricount) as usize
                     {
-                        if (i - index_offset_local as usize) % 2 == 0 {
-                            indices.extend([
-                                vertex_offset + new_indices[i + 2],
-                                vertex_offset + new_indices[i + 1],
-                                vertex_offset + new_indices[i],
-                            ])
+                        let corners = if (i - index_offset_local as usize) % 2 == 0 {
+                            [new_indices[i + 2], new_indices[i + 1], new_indices[i]]
                         } else {
-                            indices.extend([
-                                vertex_offset + new_indices[i],
-                                vertex_offset + new_indices[i + 1],
-                                vertex_offset + new_indices[i + 2],
-                            ])
+                            [new_indices[i], new_indices[i + 1], new_indices[i + 2]]
+                        };
+                        // the triangles joining strips have no area: as a list they are only
+                        // stray edges
+                        let pos = |c: u32| vertex_data[(vertex_offset + c) as usize].pos;
+                        let [a, b, c] = corners.map(pos);
+                        if a == b || b == c || a == c {
+                            continue;
                         }
+                        indices.extend(corners.map(|c| vertex_offset + c));
                     }
+                    let index_count = indices.len() as u32 - start_index;
+                    strips.push(TriStrip {
+                        start_index,
+                        index_count,
+                        texture_index: texture_index as u32,
+                        transparency: t.trans_type,
+                        flags: t.flags,
+                        tri_count: index_count / 3,
+                    });
                     index_offset_local += t.tricount + 2;
                 } else {
                     strips.push(TriStrip {

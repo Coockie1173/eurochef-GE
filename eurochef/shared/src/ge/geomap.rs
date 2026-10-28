@@ -316,6 +316,9 @@ pub struct GeScene {
     /// What the player vaults over and climbs onto
     pub edges: Vec<SceneEdge>,
     pub ladders: Vec<SceneLadder>,
+    /// A gun's points (`Point_HASH_Part_N` empties): the part, the hash, which of the part's
+    /// points of that hash (`_2` is the second), where it is in the game's space
+    pub part_points: Vec<(usize, u32, usize, [f32; 3])>,
 }
 
 #[derive(Debug, Clone, Default)]

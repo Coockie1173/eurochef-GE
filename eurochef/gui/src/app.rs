@@ -104,6 +104,8 @@ struct NewWeaponDialog {
     /// Also write the weapon's .txt next to the .edb, with this name
     write_txt: bool,
     name: String,
+    /// The export leaves out the parts only another gun's scripts show
+    no_borrowed: bool,
     status: String,
 }
 
@@ -118,6 +120,7 @@ impl Default for NewWeaponDialog {
             hash: 0x0109F000,
             write_txt: true,
             name: "Custom".to_string(),
+            no_borrowed: true,
             status: String::new(),
         }
     }
@@ -552,6 +555,7 @@ impl EurochefApp {
                     lightmap_uncompressed: dialog.lightmap_uncompressed,
                     bloom: dialog.bloom,
                     parts: false,
+                    part_spaces: vec![],
                     ..Default::default()
                 },
                 sky: (!dialog.sky_preset.is_empty()).then(|| dialog.sky.clone()),
@@ -612,7 +616,7 @@ impl EurochefApp {
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("A custom weapon's gun (mods/weapons/NAME.edb) is made from a glTF scene and a base gun's scripts, so it moves as the base does. Export the base's rig to start from: one mesh, a bone Part_N for each part, each part a vertex group of its bone's name.");
+                ui.label("A custom weapon's gun (mods/weapons/NAME.edb) is made from a glTF scene and a base gun's scripts, so it moves as the base does. Export the base's rig to start from: each part an object named for what it is (Part_02_Magazine), its points (muzzle, laser, sight) as empties under it, all ten times the game's size. Move a part's object and it and its points move in the game; edit its mesh, or join your own model into it.");
                 ui.add_space(4.0);
                 egui::Grid::new("new_weapon").num_columns(3).show(ui, |ui| {
                     ui.label("Base gun");
@@ -666,12 +670,18 @@ impl EurochefApp {
                         ui.add_enabled(dialog.write_txt, egui::TextEdit::singleline(&mut dialog.name).desired_width(160.0));
                     });
                     ui.end_row();
+
+                    ui.label("Export");
+                    ui.checkbox(&mut dialog.no_borrowed, "Leave out other guns' parts").on_hover_text(
+                        "The parts only scripts this gun borrows from its parent show (the AK-47's magazine in a rifle's second reload, Part_.._from_AK47). Left out, nothing is drawn there",
+                    );
+                    ui.end_row();
                 });
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     export = ui
                         .add_enabled(!dialog.guns.is_empty(), egui::Button::new("Export base rig"))
-                        .on_hover_text("Write the base gun as a rigged glTF scene (with its scripts as animations) to the scene's path, or one you pick")
+                        .on_hover_text("Write the base gun as a glTF scene to the scene's path, or one you pick")
                         .clicked();
                     build = ui
                         .add_enabled(!dialog.guns.is_empty() && !dialog.gltf.is_empty() && !dialog.output.is_empty(), egui::Button::new("Build"))
@@ -694,10 +704,10 @@ impl EurochefApp {
             };
             if let Some(path) = path {
                 let made = (|| -> anyhow::Result<usize> {
-                    let (_, _, scripts) = weapon::base_gun(&dialog.base).ok_or_else(|| anyhow::anyhow!("no gun {}", dialog.base))?;
+                    let (_, id, scripts) = weapon::base_gun(&dialog.base).ok_or_else(|| anyhow::anyhow!("no gun {}", dialog.base))?;
                     let data = std::fs::read(&dialog.guns)?;
                     let (blocks, parts) = weapon::read_base(&data, scripts)?;
-                    std::fs::write(&path, weapon_rig::export_rig(&data, &blocks, &parts, true)?)?;
+                    std::fs::write(&path, weapon_rig::export_rig(*id, &data, &blocks, &parts, false, !dialog.no_borrowed)?)?;
                     Ok(parts.len())
                 })();
                 dialog.status = match made {

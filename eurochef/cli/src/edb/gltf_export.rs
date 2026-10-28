@@ -85,6 +85,8 @@ pub fn add_mesh_to_scene(
     texture_map: &HashMap<u32, (String, Transparency)>,
     file_hash: u32,
 ) {
+    // GX meshes have no normals: zero ones are no use, the importer makes its own
+    let use_normals = use_normals && vertices.iter().any(|v| v.norm != [0.0; 3]);
     let vdata: &[u8] = bytemuck::cast_slice(vertices);
     let idata: &[u8] = bytemuck::cast_slice(indices);
 

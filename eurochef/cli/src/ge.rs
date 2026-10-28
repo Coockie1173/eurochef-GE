@@ -303,15 +303,21 @@ pub enum GeCommand {
         #[arg(long)]
         parts: bool,
 
-        /// Write the base gun as a rigged glTF scene to start a gun from: one mesh, a bone
-        /// Part_N for each part where the model script puts it, each part's triangles weighted
-        /// to its bone, the scripts' keyframes as animations. Then leave it at that
+        /// Write the base gun as a glTF scene to start a gun from: an object for each part
+        /// (Part_02_Magazine...) where the model script puts it, its points as empties under it,
+        /// all ten times the game's size. Then leave it at that
         #[arg(long, value_name = "GLTF")]
         export: Option<String>,
 
-        /// With --export: leave the animations out
+        /// With --export: the scripts' keyframes as animations too, to look at (in Blender they
+        /// hold the parts to their keys, so a part moved snaps back)
         #[arg(long)]
-        no_animations: bool,
+        animations: bool,
+
+        /// With --export: leave out the parts only another gun's scripts show (`..._from_AK47`),
+        /// the build makes them empty
+        #[arg(long)]
+        no_borrowed: bool,
     },
     /// Write the triggers of a file's map as a glTF scene of named nodes (spawn, mp_spawn_...,
     /// trigger_NNN_TYPE), the names `new-map` reads
@@ -459,6 +465,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     lightmap_uncompressed,
                     bloom: !no_bloom,
                     parts: false,
+                    part_spaces: vec![],
                 },
                 sky: sky.options(false)?,
                 split: !one_file,
@@ -552,6 +559,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     lightmap_uncompressed,
                     bloom: !no_bloom,
                     parts: false,
+                    part_spaces: vec![],
                 },
             )?;
             let time = std::time::SystemTime::now()
@@ -623,7 +631,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        GeCommand::Weapon { gltf, base, from, output, hash, brightness, parts, export, no_animations } => {
+        GeCommand::Weapon { gltf, base, from, output, hash, brightness, parts, export, animations, no_borrowed } => {
             let Some((name, id, scripts)) = base_gun(&base) else {
                 let names: Vec<&str> = BASE_GUNS.iter().map(|g| g.0).collect();
                 anyhow::bail!("no gun {base}, the base is one of: {}", names.join(", "));
@@ -631,15 +639,35 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             let data = std::fs::read(&from).with_context(|| format!("couldn't read {from}"))?;
             let (blocks, gun_parts) = read_base(&data, scripts)?;
             if let Some(export) = export {
-                let text = eurochef_shared::ge::weapon_rig::export_rig(&data, &blocks, &gun_parts, !no_animations)?;
+                let text = eurochef_shared::ge::weapon_rig::export_rig(*id, &data, &blocks, &gun_parts, animations, !no_borrowed)?;
                 std::fs::write(&export, text).with_context(|| format!("couldn't write {export}"))?;
-                println!("{export}: {name}'s {} part(s), rigged", gun_parts.len());
+                println!("{export}: {name}'s {} part(s), ten times the game's size (Gun_x10)", gun_parts.len());
                 return Ok(());
             }
             if parts || gltf.is_none() {
                 println!("{name} ({id:08X}): {} part(s) in {} script(s)", gun_parts.len(), blocks.len());
-                for (i, part) in gun_parts.iter().enumerate() {
-                    println!("  Part_{i}: entity {:3} ({:08X}) on {:08X} {}", part.entity, part.entity_hash, part.locator, locator_name(part.locator));
+                let labels = eurochef_shared::ge::weapon_rig::part_labels(*id, &blocks, &gun_parts);
+                for (part, label) in gun_parts.iter().zip(&labels) {
+                    println!("  {:<34} entity {:3} ({:08X}) on {:08X} {}", label.name, part.entity, part.entity_hash, part.locator, locator_name(part.locator));
+                    let points: Vec<String> = eurochef_shared::ge::weapon::point_list(&part.points)
+                        .iter()
+                        .map(|(hash, at, _)| format!("{hash:08X} at {:.3} {:.3} {:.3}", at[0], at[1], at[2]))
+                        .collect();
+                    if !points.is_empty() {
+                        println!("      points: {}", points.join(", "));
+                    }
+                    //the far copy's (the body's is the whole gun: what a guard holds and fires from)
+                    let far: Vec<String> = part.lod_points.as_deref().map(eurochef_shared::ge::weapon::point_list).unwrap_or_default()
+                        .iter()
+                        .map(|(hash, at, _)| format!("{hash:08X} at {:.3} {:.3} {:.3}", at[0], at[1], at[2]))
+                        .collect();
+                    if !far.is_empty() {
+                        println!("      far points: {}", far.join(", "));
+                    }
+                    match label.from {
+                        Some(from) => println!("      the {from}'s, only in its {}", label.shown_in.join(", ")),
+                        None => println!("      in {}", label.shown_in.join(", ")),
+                    }
                 }
                 return Ok(());
             }
@@ -649,6 +677,9 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             std::fs::write(&output, &made.file).with_context(|| format!("couldn't write {output}"))?;
             let given: Vec<String> = made.given.iter().map(|i| format!("Part_{i}")).collect();
             println!("{output}: {name}'s {} script(s), {} of its {} part(s) from the scene ({}), {} texture(s)", made.scripts, given.len(), made.parts, given.join(" "), made.textures);
+            for (part, hash, by) in &made.moved {
+                println!("  Part_{part}'s point {hash:08X} moved {:.4} {:.4} {:.4}", by[0], by[1], by[2]);
+            }
             Ok(())
         }
         GeCommand::ExportTriggers { filename, output } => {

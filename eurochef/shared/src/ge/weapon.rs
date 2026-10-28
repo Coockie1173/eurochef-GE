@@ -20,8 +20,8 @@ use std::collections::HashMap;
 
 use super::{
     geomap::{EDB_MAGIC, EDB_VERSION, GeScene},
-    mesh::{write_mesh, GeVertex, MeshData, MeshPart, ENTITY_MESH},
-    weapon_rig::rest_places,
+    mesh::{write_mesh, GeVertex, MeshData, MeshPart, ENTITY_MESH, ENTITY_SPLIT},
+    weapon_rig::{rest_places, Place},
     texture::{write_texture, GeTexture},
     writer::{read_rel, read_u16, read_u32, Writer},
 };
@@ -135,9 +135,11 @@ fn lod_entity(d: &[u8], row: usize) -> Option<usize> {
 /// rest where their table is). A row of the table is where its block is (from the row, above
 /// the low byte) and the block's number. Block 5 is the count at +5 and, from +6, where the 0x30
 /// byte points are (a hash, a scale, a position and a rotation each): what a guard holds the gun
-/// by and shoots from (ge_gun_parts has it read as the parts are drawn on a guard, fn_80313EA0)
+/// by and shoots from (ge_gun_parts has it read as the parts are drawn on a guard, fn_80313EA0).
+/// A split (0x603, the Sigmus's body) has the same word: the muzzle 100000B8 and the sight 10000147
+/// the hands' flash (fn_80154740) and aiming (fn_800F6620) look for are in it
 fn mesh_points(d: &[u8], mesh: usize) -> Vec<u8> {
-    if mesh + 0xC0 > d.len() || read_u32(d, mesh) != ENTITY_MESH {
+    if mesh + 0xC0 > d.len() || !matches!(read_u32(d, mesh), ENTITY_MESH | ENTITY_SPLIT) {
         return vec![];
     }
     let word = read_u32(d, mesh + MESH_BLOCKS);
@@ -179,7 +181,7 @@ pub fn locator_name(locator: u32) -> &'static str {
         0x15000150 => "laser pointer",
         0x15000157 => "thermal scope",
         0x150000DA => "grenade launcher",
-        0x150000DE => "attachment 0x40",
+        0x150000DE => "sniper scope",
         0xFFFFFFFF => "moves on its own",
         _ => "",
     }
@@ -242,8 +244,11 @@ pub fn read_base(d: &[u8], hashes: &[u32]) -> anyhow::Result<(Vec<ScriptBlock>, 
     let mut parts: Vec<GunPart> = vec![];
     let mut blocks = vec![];
     for &hash in hashes {
+        //the Kallos-TT9's fourth firing mode names 04002FBC, which o_guns doesn't have: the game
+        //finds nothing there either
         let Some(row) = (0..scripts.count).map(|i| scripts.at + i * 16).find(|&r| read_u32(d, r) == hash) else {
-            anyhow::bail!("the base file has no script {hash:08X}");
+            tracing::warn!("the base file has no script {hash:08X}, the gun is left without it as the game's is");
+            continue;
         };
         let at = read_u32(d, row + 8) as usize;
         let end = *starts.iter().find(|&&s| s > at).unwrap_or(&d.len());
@@ -596,6 +601,8 @@ pub struct BuiltWeapon {
     pub parts: usize,
     /// The parts the scene gave, by their number
     pub given: Vec<usize>,
+    /// The points the scene moved: the part, the point's hash and how far, in the part's space
+    pub moved: Vec<(usize, u32, [f32; 3])>,
     pub textures: usize,
 }
 
@@ -607,9 +614,12 @@ pub fn build_weapon(gltf: &str, base: &str, guns: &[u8], brightness: f32, file_h
         let names: Vec<&str> = BASE_GUNS.iter().map(|g| g.0).collect();
         anyhow::bail!("no gun {base}, the base is one of: {}", names.join(", "));
     };
-    let (blocks, gun_parts) = read_base(guns, scripts)?;
-    let options = ImportOptions { parts: true, brightness, ..Default::default() };
+    let (blocks, mut gun_parts) = read_base(guns, scripts)?;
+    let places = rest_places(&blocks, gun_parts.len());
+    let part_spaces = places.iter().map(|p| p.mirrored().inverse_matrix()).collect();
+    let options = ImportOptions { parts: true, brightness, part_spaces, ..Default::default() };
     let scene = import_gltf(gltf, &options)?;
+    let moved = place_points(&scene, &places, &mut gun_parts);
     let meshes = scene_parts(&scene, gun_parts.len())?;
     let made: Vec<Option<MeshData>> = meshes.into_iter().map(|m| (m.triangle_count() > 0).then_some(m)).collect();
     let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0);
@@ -620,6 +630,69 @@ pub fn build_weapon(gltf: &str, base: &str, guns: &[u8], brightness: f32, file_h
         scripts: blocks.len(),
         parts: gun_parts.len(),
         given: made.iter().enumerate().filter(|(_, m)| m.is_some()).map(|(i, _)| i).collect(),
+        moved,
         textures: scene.textures.len(),
     })
+}
+
+/// A point's position in a mesh's points block (block 5: the count at +5, then from where +6 says
+/// the 0x30-byte points, a hash, three floats of 0.5, the position, the rotation)
+const POINT_POSITION: usize = 0x14;
+
+/// A part's points as `GunPart::points` has them: the hash, the position in the part's space and
+/// where in the bytes the position is
+pub fn point_list(points: &[u8]) -> Vec<(u32, [f32; 3], usize)> {
+    if points.len() < 8 {
+        return vec![];
+    }
+    let first = 6 + read_u16(points, 6) as i16 as isize;
+    (0..points[5] as usize)
+        .map(|i| first as usize + i * POINT_SIZE)
+        .take_while(|at| at + POINT_POSITION + 12 <= points.len())
+        .map(|at| {
+            let p = at + POINT_POSITION;
+            (read_u32(points, at), [0, 1, 2].map(|k| f32::from_bits(read_u32(points, p + k * 4))), p)
+        })
+        .collect()
+}
+
+/// The points the scene has (`Point_HASH_Part_N` empties) where it puts them, into each part's
+/// space as the base's script places it; the far copy's point of the same hash goes as far (the
+/// body's: the whole gun's grip and muzzle). Their turn stays the base's
+fn place_points(scene: &GeScene, places: &[Place], gun_parts: &mut [GunPart]) -> Vec<(usize, u32, [f32; 3])> {
+    let mut moved = vec![];
+    for &(part, hash, nth, at) in &scene.part_points {
+        let Some(g) = gun_parts.get_mut(part) else { continue };
+        let near = point_list(&g.points).into_iter().filter(|p| p.0 == hash).nth(nth);
+        let far_only = || g.lod_points.as_deref().and_then(|lod| point_list(lod).into_iter().filter(|p| p.0 == hash).nth(nth));
+        let Some((_, old, offset)) = near.or_else(far_only) else { continue };
+        let new = places[part].inverse_point(at);
+        let by = [0, 1, 2].map(|k| new[k] - old[k]);
+        if by.iter().all(|v| v.abs() < 1e-5) {
+            continue;
+        }
+        let shift = |points: &mut Vec<u8>, at: usize| {
+            for k in 0..3 {
+                let v = f32::from_bits(read_u32(points, at + k * 4)) + by[k];
+                points[at + k * 4..at + k * 4 + 4].copy_from_slice(&v.to_bits().to_be_bytes());
+            }
+        };
+        if near.is_none() {
+            // a point of the far copy alone: only that one moves
+            if let Some(lod) = g.lod_points.as_mut() {
+                shift(lod, offset);
+            }
+            moved.push((part, hash, by));
+            continue;
+        }
+        shift(&mut g.points, offset);
+        if let Some(lod) = g.lod_points.as_mut() {
+            if let Some(&(_, _, at)) = point_list(lod).iter().filter(|p| p.0 == hash).nth(nth) {
+                shift(lod, at);
+            }
+        }
+        moved.push((part, hash, by));
+    }
+    moved.sort_by_key(|m| (m.0, m.1));
+    moved
 }

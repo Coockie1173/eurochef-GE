@@ -1,12 +1,18 @@
-//! A base gun as one rigged mesh in glTF, to make a custom weapon's gun from: an armature with a
-//! bone for each part (`Part_N`, with the locator's role after it), placed where the gun's first
-//! script puts the part on its first frame, and every part's triangles in the one mesh, weighted
-//! all to its bone (a vertex group of the bone's name in Blender). The gun is seen put together;
-//! a part is edited or swapped by its vertex group, and the build (`ge weapon`) takes each
-//! triangle back to its bone's part, in the bone's own space, so the copied scripts place it again.
+//! A base gun as a glTF scene to make a custom weapon's gun from, what you see what the game
+//! draws: each part an object of its own with its origin where the gun's first script puts the
+//! part on its first frame, the part's own mesh around it. Names say what a part is
+//! (`Part_02_Magazine`, `weapon_parts`); one only another gun's scripts show (the AK-47's
+//! magazine in a rifle that plays the AK's reload) ends in `_from_` that gun. Each point of a
+//! part (a muzzle, a laser's start, a scope's sight) is an empty under it, `Point_HASH_Part_N`.
 //!
-//! The scripts' keyframes of the parts go along as animations (one per script with more than a
-//! frame, named by its hash), to see how a reload moves them. They aren't read back.
+//! The build (`ge weapon`) takes each part's triangles from where they are on the assembled gun
+//! into the part's space as the base's scripts place it, and each point from where its empty is.
+//! So moving a part's object moves the part and its points; editing its mesh moves only the mesh.
+//!
+//! All of it is under `Gun_x10`, ten times the game's size (a pistol is 0.2 m), which the build
+//! takes back out. With `animations` the scripts' keyframes of the parts go along (one per script
+//! with more than a frame, named by the action it is: `Fire`, `Reload`, `Reload_Alt`...), to see
+//! how a reload moves them; they aren't read back, and in Blender they hold a part to its keys.
 //!
 //! As everywhere in `ge`, the game is glTF's mirror image: x is negated, and with it a
 //! rotation's y and z.
@@ -21,7 +27,8 @@ use eurochef_edb::{binrw::BinReaderExt, edb::EdbFile, entity::EXGeoEntity, versi
 use serde_json::{json, Value};
 
 use super::{
-    weapon::{locator_name, GunPart, ScriptBlock},
+    weapon::{point_list, GunPart, ScriptBlock},
+    weapon_parts::{gun_name, part_name, script_role},
     writer::{read_rel, read_u16, read_u32},
 };
 use crate::{entities::read_entity, platform::texture::create_for_platform, textures::UXGeoTexture};
@@ -35,6 +42,8 @@ const CHANNEL_ROTATION: u32 = 0x8;
 const CHANNEL_SCALE: u32 = 0x10;
 /// A strip of a mesh drawn from both sides
 const STRIP_TWO_SIDED: u16 = 0x40;
+/// How many times the game's size the rig is drawn (`Gun_x10`)
+const RIG_SCALE: f32 = 10.0;
 
 /// Where a script puts a part: position, rotation (x, y, z, w) and scale, as the game has them
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -84,6 +93,12 @@ impl Place {
         let v = [0, 1, 2].map(|i| r[i][0] * n[0] + r[i][1] * n[1] + r[i][2] * n[2]);
         let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         if length > 1e-9 { v.map(|c| c / length) } else { [0.0, 1.0, 0.0] }
+    }
+
+    /// A point of the place back in the part's own space
+    pub fn inverse_point(&self, p: [f32; 3]) -> [f32; 3] {
+        let m = self.inverse_matrix();
+        [0, 1, 2].map(|r| m[0][r] * p[0] + m[1][r] * p[1] + m[2][r] * p[2] + m[3][r])
     }
 
     /// What takes a point of the place back into the part's own space, as a glTF matrix (by columns)
@@ -185,13 +200,17 @@ fn script_controllers(block: &ScriptBlock) -> HashMap<usize, Keyframes> {
     by_part
 }
 
-/// Where each part rests: where the first script that names it puts it on its first frame
-/// (the gun's model script first, as `read_base` reads them)
+/// Where each part rests: where the first script that has keys for it puts it on its first frame
+/// (the gun's model script first, as `read_base` reads them). A script may name a part with a
+/// controller it doesn't have (the P99's model script names the silencer with controller 5 of
+/// its 4): the game draws it where the scripts that have one put it (the muzzle, as its reload's
+/// controller 5 does), not at the origin. A part no script has keys for rests at the origin
 pub fn rest_places(blocks: &[ScriptBlock], count: usize) -> Vec<Place> {
     let mut places: Vec<Option<Place>> = vec![None; count];
     for block in blocks {
         for (part, keys) in script_controllers(block) {
-            if part < count && places[part].is_none() {
+            let keyed = !(keys.position.is_empty() && keys.rotation.is_empty() && keys.scale.is_empty());
+            if part < count && places[part].is_none() && keyed {
                 places[part] = Some(keys.first());
             }
         }
@@ -199,10 +218,40 @@ pub fn rest_places(blocks: &[ScriptBlock], count: usize) -> Vec<Place> {
     places.into_iter().map(|p| p.unwrap_or_default()).collect()
 }
 
-/// A bone's name: `Part_N`, and the locator's role when it has one
-pub fn bone_name(index: usize, part: &GunPart) -> String {
-    let role: String = locator_name(part.locator).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    if role.is_empty() { format!("Part_{index}") } else { format!("Part_{index}_{role}") }
+/// A part as the rig names it, and what it is to the gun
+pub struct PartLabel {
+    /// `Part_02_Magazine`, `Part_12_Magazine_from_AK47`: the bone's and the mesh's
+    pub name: String,
+    /// The actions that show it (`Idle Fire Reload`)
+    pub shown_in: Vec<String>,
+    /// The gun whose part it is when only scripts of that gun (a parent's) show it
+    pub from: Option<&'static str>,
+}
+
+/// The rig's names for the parts of `gun` (its id), `blocks` and `parts` as `read_base` read them
+pub fn part_labels(gun: u32, blocks: &[ScriptBlock], parts: &[GunPart]) -> Vec<PartLabel> {
+    let squash = |s: &str| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>();
+    (0..parts.len())
+        .map(|index| {
+            let mut shown_in = vec![];
+            let mut owners = vec![];
+            for block in blocks.iter().filter(|b| b.parts.iter().any(|(_, p)| *p == index)) {
+                // the row's model may be in no list (it is the first one's for most)
+                let (action, owner) = script_role(gun, block.hash).unwrap_or_else(|| ("Idle".to_string(), gun));
+                if !shown_in.contains(&action) {
+                    shown_in.push(action);
+                }
+                owners.push(owner);
+            }
+            let from = (!owners.is_empty() && owners.iter().all(|o| *o != gun)).then(|| gun_name(owners[0])).flatten();
+            let what = part_name(&parts[index]);
+            let mut name = if what == "Part" { format!("Part_{index:02}") } else { format!("Part_{index:02}_{what}") };
+            if let Some(from) = from {
+                name += &format!("_from_{}", squash(from));
+            }
+            PartLabel { name, shown_in, from }
+        })
+        .collect()
 }
 
 /// The glTF file's one buffer, filled as the accessors are made
@@ -249,22 +298,28 @@ fn png_uri(rgba: &[u8], width: u32, height: u32) -> anyhow::Result<String> {
     Ok(uri)
 }
 
-/// The base gun as a rigged glTF file's text. `data` is o_guns.edb, `blocks` and `parts` what
-/// `read_base` read of it. `animations`: the scripts' keyframes too
-pub fn export_rig(data: &[u8], blocks: &[ScriptBlock], parts: &[GunPart], animations: bool) -> anyhow::Result<String> {
+/// The base gun as a glTF file's text. `gun` is its id, `data` o_guns.edb, `blocks` and `parts`
+/// what `read_base` read of it. `animations`: the scripts' keyframes too. `borrowed`: the parts
+/// only another gun's scripts show too (left out, the build makes them empty)
+pub fn export_rig(gun: u32, data: &[u8], blocks: &[ScriptBlock], parts: &[GunPart], animations: bool, borrowed: bool) -> anyhow::Result<String> {
     let mut edb = EdbFile::new(Box::new(Cursor::new(data.to_vec())), Platform::Wii)?;
     let header = edb.header.clone();
     let decoder = create_for_platform(Platform::Wii);
     let places = rest_places(blocks, parts.len());
 
+    let labels = part_labels(gun, blocks, parts);
+    let kept: Vec<usize> = (0..parts.len()).filter(|i| borrowed || labels[*i].from.is_none()).collect();
+
     let mut gltf = Gltf { buffer: vec![], views: vec![], accessors: vec![] };
-    let mut primitives = vec![];
+    // each part's mesh: its number and primitives
+    let mut meshes: Vec<(usize, Vec<Value>)> = vec![];
     let mut materials: Vec<Value> = vec![];
     let mut images: Vec<Value> = vec![];
     let mut material_of: HashMap<u32, usize> = HashMap::new();
     let mut left_out = vec![];
 
-    for (index, part) in parts.iter().enumerate() {
+    for &index in &kept {
+        let part = &parts[index];
         let Some(entity) = header.entity_list.iter().find(|e| e.common.hashcode == part.entity_hash) else {
             left_out.push(index);
             continue;
@@ -278,27 +333,27 @@ pub fn export_rig(data: &[u8], blocks: &[ScriptBlock], parts: &[GunPart], animat
             continue;
         }
 
-        // in its place on the gun, mirrored
-        let place = places[index].mirrored();
+        // in the part's own space, mirrored: its node puts it on the gun
         let mut positions = vec![];
         let mut normals = vec![];
         let mut uvs = vec![];
         let mut colours = vec![];
         for v in &vertices {
-            positions.extend(place.point([-v.pos[0], v.pos[1], v.pos[2]]));
-            normals.extend(place.direction([-v.norm[0], v.norm[1], v.norm[2]]));
+            positions.extend([-v.pos[0], v.pos[1], v.pos[2]]);
+            normals.extend([-v.norm[0], v.norm[1], v.norm[2]]);
             uvs.extend(v.uv);
             colours.extend(v.color);
         }
-        let joints: Vec<u8> = vertices.iter().flat_map(|_| [index as u8, 0, 0, 0]).collect();
-        let weights: Vec<f32> = vertices.iter().flat_map(|_| [1.0, 0.0, 0.0, 0.0]).collect();
         let a_position = gltf.floats(&positions, 3, "VEC3", true);
-        let a_normal = gltf.floats(&normals, 3, "VEC3", false);
         let a_uv = gltf.floats(&uvs, 2, "VEC2", false);
         let a_colour = gltf.floats(&colours, 4, "VEC4", false);
-        let a_joints = gltf.accessor(&joints, 5121, "VEC4", vertices.len(), json!({}));
-        let a_weights = gltf.floats(&weights, 4, "VEC4", false);
+        let mut attributes = json!({ "POSITION": a_position, "TEXCOORD_0": a_uv, "COLOR_0": a_colour });
+        // the game's guns have no normals: zero ones are no use, the importer makes its own
+        if normals.iter().any(|n| *n != 0.0) {
+            attributes["NORMAL"] = json!(gltf.floats(&normals, 3, "VEC3", false));
+        }
 
+        let mut primitives = vec![];
         for strip in &strips {
             let texture = if strip.texture_index == u32::MAX { u32::MAX } else { header.texture_list[strip.texture_index as usize].common.hashcode };
             let material = match material_of.get(&texture) {
@@ -334,39 +389,78 @@ pub fn export_rig(data: &[u8], blocks: &[ScriptBlock], parts: &[GunPart], animat
             let bytes: Vec<u8> = strip_indices.iter().flat_map(|i| i.to_le_bytes()).collect();
             let a_indices = gltf.accessor(&bytes, 5125, "SCALAR", strip_indices.len(), json!({}));
             primitives.push(json!({
-                "attributes": {
-                    "POSITION": a_position, "NORMAL": a_normal, "TEXCOORD_0": a_uv, "COLOR_0": a_colour,
-                    "JOINTS_0": a_joints, "WEIGHTS_0": a_weights,
-                },
+                "attributes": attributes.clone(),
                 "indices": a_indices,
                 "material": material,
             }));
         }
+        if !primitives.is_empty() {
+            meshes.push((index, primitives));
+        }
     }
-    anyhow::ensure!(!primitives.is_empty(), "none of the base gun's parts could be read");
+    anyhow::ensure!(!meshes.is_empty(), "none of the base gun's parts could be read");
     if !left_out.is_empty() {
-        tracing::warn!("parts {left_out:?} have no triangles of their own, their bones are left empty");
+        tracing::warn!("parts {left_out:?} have no triangles of their own, their objects are left empty");
     }
 
-    // nodes: the gun's mesh, the armature, a bone for each part
-    let first_bone = 2;
-    let mut nodes = vec![
-        json!({ "name": "Gun", "mesh": 0, "skin": 0 }),
-        json!({ "name": "Armature", "children": (first_bone..first_bone + parts.len()).collect::<Vec<_>>() }),
-    ];
-    let mut inverse = vec![];
-    for (index, part) in parts.iter().enumerate() {
+    // nodes: the gun ten times the size, an object for each part, the part's points under it
+    let first_part = 1;
+    let mut nodes = vec![json!({
+        "name": format!("Gun_x{RIG_SCALE}"),
+        "scale": [RIG_SCALE, RIG_SCALE, RIG_SCALE],
+        "children": (first_part..first_part + kept.len()).collect::<Vec<_>>(),
+    })];
+    let node_of: HashMap<usize, usize> = kept.iter().enumerate().map(|(k, index)| (*index, first_part + k)).collect();
+    let about = |label: &PartLabel| match label.from {
+        Some(from) => format!(
+            "The {from}'s own part: this gun plays the {from}'s {} and shows it there. Make it match your gun or delete it (then nothing is drawn in its place).",
+            label.shown_in.join(", ")
+        ),
+        None => format!("Shown in: {}", label.shown_in.join(", ")),
+    };
+    let mesh_of: HashMap<usize, usize> = meshes.iter().enumerate().map(|(mesh, (index, _))| (*index, mesh)).collect();
+    let mut points = vec![];
+    for &index in &kept {
+        let part = &parts[index];
         let place = places[index].mirrored();
-        nodes.push(json!({
-            "name": bone_name(index, part),
+        let mut node = json!({
+            "name": labels[index].name,
             "translation": place.position,
             "rotation": place.rotation,
             "scale": place.scale,
-            "extras": { "entity": format!("{:08X}", part.entity_hash), "locator": format!("{:08X}", part.locator) },
-        }));
-        inverse.extend(place.inverse_matrix().iter().flatten().copied());
+            "extras": { "entity": format!("{:08X}", part.entity_hash), "locator": format!("{:08X}", part.locator), "about": about(&labels[index]) },
+        });
+        if let Some(mesh) = mesh_of.get(&index) {
+            node["mesh"] = json!(mesh);
+        }
+        let mut children = vec![];
+        let mut seen: Vec<u32> = vec![];
+        for (hash, at, _) in point_list(&part.points) {
+            seen.push(hash);
+            let nth = seen.iter().filter(|h| **h == hash).count();
+            let name = if nth > 1 { format!("Point_{hash:08X}_Part_{index}_{nth}") } else { format!("Point_{hash:08X}_Part_{index}") };
+            children.push(first_part + kept.len() + points.len());
+            points.push(json!({ "name": name, "translation": [-at[0], at[1], at[2]] }));
+        }
+        // points only the far copy has (the Sigmus's muzzle and grip are only on its whole gun,
+        // which the game fires from in the hands too): empties all the same, in the same space
+        let near = seen.clone();
+        for (hash, at, _) in part.lod_points.as_deref().map(point_list).unwrap_or_default() {
+            if near.contains(&hash) {
+                continue;
+            }
+            seen.push(hash);
+            let nth = seen.iter().filter(|h| **h == hash).count();
+            let name = if nth > 1 { format!("Point_{hash:08X}_Part_{index}_{nth}") } else { format!("Point_{hash:08X}_Part_{index}") };
+            children.push(first_part + kept.len() + points.len());
+            points.push(json!({ "name": name, "translation": [-at[0], at[1], at[2]] }));
+        }
+        if !children.is_empty() {
+            node["children"] = json!(children);
+        }
+        nodes.push(node);
     }
-    let a_inverse = gltf.floats(&inverse, 16, "MAT4", false);
+    nodes.extend(points);
 
     let mut out_animations = vec![];
     if animations {
@@ -381,12 +475,13 @@ pub fn export_rig(data: &[u8], blocks: &[ScriptBlock], parts: &[GunPart], animat
             let mut by_part: Vec<(usize, Keyframes)> = script_controllers(block).into_iter().collect();
             by_part.sort_by_key(|(part, _)| *part);
             for (part, keys) in by_part {
+                let Some(&node) = node_of.get(&part) else { continue };
                 let rest = Place::default();
                 let mut add = |path: &str, times: Vec<f32>, values: Vec<f32>, width: usize, kind: &str| {
                     let input = gltf.floats(&times, 1, "SCALAR", true);
                     let output = gltf.floats(&values, width, kind, false);
                     samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
-                    channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": first_bone + part, "path": path } }));
+                    channels.push(json!({ "sampler": samplers.len() - 1, "target": { "node": node, "path": path } }));
                 };
                 //a channel the controller doesn't have stays as the game leaves it
                 let mirror = |p: Place| p.mirrored();
@@ -410,7 +505,11 @@ pub fn export_rig(data: &[u8], blocks: &[ScriptBlock], parts: &[GunPart], animat
                 add("scale", scale.iter().map(|k| k.0 / rate).collect(), scale.iter().flat_map(|k| k.1).collect(), 3, "VEC3");
             }
             if !channels.is_empty() {
-                out_animations.push(json!({ "name": format!("{:08X}", block.hash), "samplers": samplers, "channels": channels }));
+                let mut name = script_role(gun, block.hash).map(|(action, _)| action).unwrap_or_else(|| format!("{:08X}", block.hash));
+                if out_animations.iter().any(|a: &Value| a["name"] == name.as_str()) {
+                    name = format!("{name}_{:08X}", block.hash);
+                }
+                out_animations.push(json!({ "name": name, "samplers": samplers, "channels": channels }));
             }
         }
     }
@@ -421,10 +520,9 @@ pub fn export_rig(data: &[u8], blocks: &[ScriptBlock], parts: &[GunPart], animat
     let mut root = json!({
         "asset": { "version": "2.0", "generator": "eurochef ge weapon" },
         "scene": 0,
-        "scenes": [{ "nodes": [0, 1] }],
+        "scenes": [{ "nodes": [0] }],
         "nodes": nodes,
-        "meshes": [{ "name": "Gun", "primitives": primitives }],
-        "skins": [{ "name": "Gun", "joints": (first_bone..first_bone + parts.len()).collect::<Vec<_>>(), "inverseBindMatrices": a_inverse, "skeleton": 1 }],
+        "meshes": meshes.iter().map(|(index, primitives)| json!({ "name": labels[*index].name, "primitives": primitives })).collect::<Vec<_>>(),
         "materials": materials,
         "images": images,
         "textures": textures,

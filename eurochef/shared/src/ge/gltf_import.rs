@@ -84,6 +84,11 @@ pub struct ImportOptions {
     /// with everything below it, in the scene's `rooms` as its number. A skinned mesh's
     /// triangles are the part of the joint (bone `Part_N...`) they are weighted to, in its space
     pub parts: bool,
+    /// With `parts`: what takes a point of the assembled gun into each part's own space (by the
+    /// part's number, a glTF matrix). Given, a part's triangles go from where they are in the
+    /// scene into that space, whatever the scene's bones are; empty, into the joint's space by
+    /// the scene's inverse bind matrix (and an unweighted mesh as it is placed)
+    pub part_spaces: Vec<[[f32; 4]; 4]>,
 }
 
 impl Default for ImportOptions {
@@ -98,6 +103,7 @@ impl Default for ImportOptions {
             lightmap_uncompressed: false,
             bloom: true,
             parts: false,
+            part_spaces: vec![],
         }
     }
 }
@@ -307,6 +313,32 @@ fn part_of_name(name: Option<&str>) -> Option<String> {
     (!id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then(|| room_id(id))
 }
 
+/// How many times the game's size a gun's rig is drawn: a node named `Gun_xN`
+fn gun_scale_of_name(name: Option<&str>) -> Option<f32> {
+    let name = without_copy_number(name?);
+    if !name.get(..5)?.eq_ignore_ascii_case("gun_x") {
+        return None;
+    }
+    name[5..].parse::<f32>().ok().filter(|n| *n > 0.0)
+}
+
+/// A gun part's point an empty named `Point_HASH_Part_N` (`..._2` for the part's second point of
+/// that hash) stands for: the hash, the part's number and which of its points of that hash
+fn point_of_name(name: Option<&str>) -> Option<(u32, usize, usize)> {
+    let name = without_copy_number(name?);
+    if !name.get(..6)?.eq_ignore_ascii_case("point_") {
+        return None;
+    }
+    let mut words = name[6..].split('_');
+    let hash = u32::from_str_radix(words.next()?, 16).ok()?;
+    if !words.next()?.eq_ignore_ascii_case("part") {
+        return None;
+    }
+    let number = words.next()?.parse().ok()?;
+    let nth = words.next().and_then(|w| w.parse::<usize>().ok()).map_or(0, |k| k.saturating_sub(1));
+    Some((hash, number, nth))
+}
+
 /// The two rooms a node named `Portal_XX_YY...` joins
 fn portal_of_name(name: Option<&str>) -> Option<[String; 2]> {
     let name = without_copy_number(name?);
@@ -430,6 +462,9 @@ struct Inherited {
     sky: bool,
     /// The obstacle's top its triangles are
     top: Option<usize>,
+    /// A gun's rig drawn N times the game's size (`Gun_xN`): N (0 for none), what a skinned mesh,
+    /// which its node doesn't place, is made smaller by
+    shrink: f32,
 }
 
 impl Importer<'_> {
@@ -563,6 +598,11 @@ impl Importer<'_> {
             return Ok(());
         }
         let matrix = multiply(parent, &node.transform().matrix());
+        if let Some((hash, number, nth)) = self.options.parts.then(|| point_of_name(node.name())).flatten() {
+            let p = transform_point(&matrix, [0.0, 0.0, 0.0]);
+            let scale = self.options.scale;
+            self.scene.part_points.push((number, hash, nth, [-p[0] * scale, p[1] * scale, p[2] * scale]));
+        }
         let mut part = inherited;
         part.added |= is_added_collision_name(node.name());
         part.collision |= part.added || is_collision_name(node.name());
@@ -682,7 +722,8 @@ impl Importer<'_> {
         };
         // a rigged gun: each vertex is its heaviest joint's, in that joint's own space (the
         // mesh node's place doesn't count for a skinned mesh)
-        let joints: Option<Vec<usize>> = skin.and_then(|skin| {
+        // one weighted to nothing (put into a rigged gun afterwards) is the part its node names
+        let joints: Option<Vec<Option<usize>>> = skin.and_then(|skin| {
             let joints: Vec<[u16; 4]> = reader.read_joints(0)?.into_u16().collect();
             let weights: Vec<[f32; 4]> = reader.read_weights(0)?.into_f32().collect();
             Some(
@@ -691,14 +732,38 @@ impl Importer<'_> {
                     .zip(&weights)
                     .map(|(j, w)| {
                         let heaviest = (0..4).fold(0, |best, k| if w[k] > w[best] { k } else { best });
-                        (j[heaviest] as usize).min(skin.inverse.len().saturating_sub(1))
+                        (w[heaviest] > 1e-6).then(|| (j[heaviest] as usize).min(skin.inverse.len().saturating_sub(1)))
                     })
                     .collect(),
             )
         });
-        let vertex_matrix = |i: usize| match (&joints, skin) {
-            (Some(joints), Some(skin)) => joints.get(i).and_then(|j| skin.inverse.get(*j)).unwrap_or(matrix),
-            _ => matrix,
+        // with the base's part spaces: from where the triangles are on the assembled gun (a
+        // weighted vertex as it is bound, another as its node places it) into the part's space,
+        // the bones' own matrices left out (Blender turns bones as it likes). One under no
+        // part's node is part 0's
+        let space = |room: Option<usize>| -> Option<[[f32; 4]; 4]> {
+            let number: usize = self.room_ids.get(room?)?.parse().ok()?;
+            self.options.part_spaces.get(number).copied()
+        };
+        let in_part = match space(part.room.or_else(|| self.room_ids.iter().position(|id| id == "0"))) {
+            Some(space) => multiply(&space, matrix),
+            None => *matrix,
+        };
+        let shrink = if part.shrink > 0.0 { 1.0 / part.shrink } else { 1.0 };
+        let smaller = [[shrink, 0.0, 0.0, 0.0], [0.0, shrink, 0.0, 0.0], [0.0, 0.0, shrink, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let joint_spaces: Vec<[[f32; 4]; 4]> = skin
+            .map(|skin| {
+                skin.inverse.iter().zip(&skin.rooms).map(|(inverse, room)| multiply(&space(*room).unwrap_or(*inverse), &smaller)).collect()
+            })
+            .unwrap_or_default();
+        let joint_of = |i: usize| joints.as_ref().and_then(|joints| joints.get(i).copied().flatten());
+        let vertex_matrix = |i: usize| match joint_of(i) {
+            Some(j) => joint_spaces.get(j).unwrap_or(&in_part),
+            None => &in_part,
+        };
+        let room_of = |i: usize| match (joint_of(i), skin) {
+            (Some(j), Some(skin)) => skin.rooms.get(j).copied().flatten(),
+            _ => part.room,
         };
         let scale = self.options.scale;
         // mirrored: x is negated here, the triangles are turned around below
@@ -713,9 +778,8 @@ impl Importer<'_> {
         // weighted to another joint (where the slide meets the frame) would be off by the
         // difference between the two, a sliver out of the gun
         let chosen = |t: &[usize; 3]| -> Option<usize> {
-            let (joints, skin) = (joints.as_ref()?, skin?);
-            let room = |k: usize| joints.get(t[k]).and_then(|j| skin.rooms.get(*j)).copied().flatten();
-            Some(if room(1) == room(2) { 1 } else { 0 })
+            joints.as_ref()?;
+            Some(if room_of(t[1]) == room_of(t[2]) { 1 } else { 0 })
         };
         let indices: Vec<u32> = match reader.read_indices() {
             Some(indices) => indices.into_u32().collect(),
@@ -837,13 +901,10 @@ impl Importer<'_> {
                 texture: Some(texture),
                 vertices,
                 no_collision: no_collision || is_sky,
-                room: match (&joints, skin) {
-                    // the part most of its corners are
-                    (Some(joints), Some(skin)) => {
-                        let room = |k: usize| joints.get(t[k]).and_then(|j| skin.rooms.get(*j)).copied().flatten();
-                        if room(1) == room(2) { room(1) } else { room(0) }
-                    }
-                    _ => part.room,
+                // the part most of its corners are
+                room: match chosen(&t) {
+                    Some(c) => room_of(t[c]),
+                    None => part.room,
                 },
                 two_sided,
                 lightmap,
@@ -890,9 +951,18 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
             importer.lightmap_nodes(&node, &identity, false)?;
         }
     }
+    // a gun's rig is drawn bigger than the game's (`Gun_x10`): the whole scene is that much
+    // smaller in the game, a model put in beside it too
+    let shrink = if options.parts { document.nodes().find_map(|n| gun_scale_of_name(n.name())) } else { None };
+    let mut top = identity;
+    if let Some(times) = shrink {
+        for k in 0..3 {
+            top[k][k] = 1.0 / times;
+        }
+    }
     for scene in &scenes {
         for node in scene.nodes() {
-            importer.node(&node, &identity, Inherited::default())?;
+            importer.node(&node, &top, Inherited { shrink: shrink.unwrap_or(0.0), ..Default::default() })?;
         }
     }
     let mut by_texture: HashMap<usize, Vec<[[f32; 2]; 3]>> = HashMap::new();

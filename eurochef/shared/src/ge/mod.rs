@@ -12,5 +12,6 @@ pub mod sky;
 pub mod texture;
 pub mod triggers;
 pub mod weapon;
+pub mod weapon_parts;
 pub mod weapon_rig;
 pub mod writer;
