@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 use super::{
     mesh::{
-        halve, write_mesh_with_collision, write_split, FACE_NO_COLLISION, Bounds, GeVertex, MeshData, MeshPart,
+        halve, write_mesh_with_collision, write_split, FACE_NO_COLLISION, FACE_STEEP, Bounds, GeVertex, MeshData, MeshPart,
         COLOUR_ONE, MAX_STRIP_TRIANGLES,
     },
     rooms::{make_zoning, positions, Zoning},
@@ -303,6 +303,8 @@ pub struct GeScene {
     pub collision: Vec<[[f32; 3]; 3]>,
     /// Triangles a body collides with as well, whichever the others are: a ramp over stairs
     pub added_collision: Vec<[[f32; 3]; 3]>,
+    /// Added collision a body stands on up to 60 degrees steep (FACE_STEEP)
+    pub steep_collision: Vec<[[f32; 3]; 3]>,
     /// Where the scene says the player starts
     pub spawn: Option<[f32; 3]>,
     /// The rooms' names. Empty: the level is one zone, drawn as a whole
@@ -470,27 +472,34 @@ impl GeScene {
                 .iter()
                 .flat_map(|t| t.vertices.iter().map(|v| v.pos))
                 .chain(self.collision.iter().flatten().copied())
-                .chain(self.added_collision.iter().flatten().copied()),
+                .chain(self.added_collision.iter().flatten().copied())
+                .chain(self.steep_collision.iter().flatten().copied()),
         )
     }
 
     /// The triangles a body collides with: the given ones, or the drawn ones, and the added
     /// ones. Without the ones that have no area, with the face's own normal
     pub fn collision_triangles(&self) -> Vec<[GeVertex; 3]> {
-        let mut source: Vec<[[f32; 3]; 3]> = if self.collision.is_empty() {
+        self.collision_faces().into_iter().map(|(t, _)| t).collect()
+    }
+
+    /// `collision_triangles` with each one's flags
+    fn collision_faces(&self) -> Vec<([GeVertex; 3], u16)> {
+        let mut source: Vec<([[f32; 3]; 3], u16)> = if self.collision.is_empty() {
             self.triangles
                 .iter()
                 .filter(|t| !t.no_collision)
-                .map(|t| [t.vertices[0].pos, t.vertices[1].pos, t.vertices[2].pos])
+                .map(|t| ([t.vertices[0].pos, t.vertices[1].pos, t.vertices[2].pos], 0))
                 .collect()
         } else {
-            self.collision.clone()
+            self.collision.iter().map(|t| (*t, 0)).collect()
         };
-        source.extend(self.added_collision.iter().copied());
+        source.extend(self.added_collision.iter().map(|t| (*t, 0)));
+        source.extend(self.steep_collision.iter().map(|t| (*t, FACE_STEEP)));
 
         source
             .into_iter()
-            .filter_map(|t| {
+            .filter_map(|(t, flags)| {
                 let u = [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]];
                 let v = [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]];
                 let n = [
@@ -503,12 +512,13 @@ impl GeScene {
                     return None;
                 }
                 let normal = [n[0] / len, n[1] / len, n[2] / len];
-                Some(t.map(|pos| GeVertex {
+                let triangle = t.map(|pos| GeVertex {
                     pos,
                     normal,
                     uv: [0.0, 0.0],
                     color: [COLOUR_ONE as u8, COLOUR_ONE as u8, COLOUR_ONE as u8, 0xFF],
-                }))
+                });
+                Some((triangle, flags))
             })
             .collect()
     }
@@ -659,16 +669,17 @@ fn drawn_meshes(triangles: Vec<Drawn>) -> Vec<MeshData> {
 }
 
 /// The parts of a collision that isn't drawn
-fn hulls(collision: Vec<[GeVertex; 3]>) -> Vec<MeshData> {
+fn hulls(collision: Vec<([GeVertex; 3], u16)>) -> Vec<MeshData> {
     let mut groups = vec![];
-    cut(collision, MAX_COLLISION_TRIANGLES, &centre_of, &mut groups);
+    cut(collision, MAX_COLLISION_TRIANGLES, &|(t, _): &([GeVertex; 3], u16)| centre_of(t), &mut groups);
     groups
         .into_iter()
-        .map(|group| MeshData {
+        .map(|group| group.into_iter().unzip())
+        .map(|(triangles, flags)| MeshData {
             parts: vec![MeshPart {
                 texture: 0,
-                triangles: group,
-                flags: vec![],
+                triangles,
+                flags,
                 two_sided: false,
                 lightmap: false,
             }],
@@ -681,7 +692,8 @@ fn make_entities(scene: &GeScene, zoning: Option<&Zoning>, stats: &mut BuildStat
     // with a collision of its own the scene's drawn triangles aren't collided with at all, and
     // with rooms the collision is always parts of its own
     // (added collision makes it one too: the drawn triangles and the added ones together)
-    let own_collision = !scene.collision.is_empty() || !scene.added_collision.is_empty();
+    let own_collision =
+        !scene.collision.is_empty() || !scene.added_collision.is_empty() || !scene.steep_collision.is_empty();
     let drawn_collides = !own_collision && zoning.is_none();
 
     // texture 0 of the file is the default one, the scene's follow. the flags: what a body
@@ -724,7 +736,7 @@ fn make_entities(scene: &GeScene, zoning: Option<&Zoning>, stats: &mut BuildStat
         }
 
         if own_collision {
-            let collision = scene.collision_triangles();
+            let collision = scene.collision_faces();
             stats.collision_triangles = collision.len();
             for hull in hulls(collision) {
                 stats.collision_meshes += 1;
@@ -757,14 +769,14 @@ fn make_entities(scene: &GeScene, zoning: Option<&Zoning>, stats: &mut BuildStat
     }
 
     // the collision's parts, each in the zone the game finds in front of its triangles
-    let collision = scene.collision_triangles();
+    let collision = scene.collision_faces();
     stats.collision_triangles = collision.len();
-    let mut by_zone: Vec<Vec<[GeVertex; 3]>> = vec![vec![]; zoning.zones.len()];
-    for triangle in collision {
+    let mut by_zone: Vec<Vec<([GeVertex; 3], u16)>> = vec![vec![]; zoning.zones.len()];
+    for (triangle, flags) in collision {
         let centre = centre_of(&triangle);
         let normal = triangle[0].normal;
         let front = [0, 1, 2].map(|k| centre[k] + normal[k] * 0.05);
-        by_zone[zoning.zone_at(front) as usize].push(triangle);
+        by_zone[zoning.zone_at(front) as usize].push((triangle, flags));
     }
     for (zone, triangles) in by_zone.into_iter().enumerate() {
         for hull in hulls(triangles) {

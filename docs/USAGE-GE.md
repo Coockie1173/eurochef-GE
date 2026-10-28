@@ -81,6 +81,7 @@ This is the whole interface. A mesh or a node (an object in Blender) whose name 
 | anything else | The level | yes | yes* |
 | `collision`, `col_`, `ucx_` | Collision, in place of the drawn triangles | no | yes |
 | `collision_add`, `col_add` | Collision on top of everything else | no | yes |
+| `collision_add_steep`, `col_add_steep` | The same, but stood on up to 60° steep (not 37°) | no | yes |
 | `spawn`, `player_start` | Where the player starts | — | — |
 | `mp_spawn` | A multiplayer spawn point | — | — |
 | `mp_spawn_team0`, `mp_spawn_team1` | A team's spawn point | — | — |

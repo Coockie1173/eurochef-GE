@@ -21,6 +21,9 @@ pub const ENTITY_MESH: u32 = 0x601;
 /// A triangle a body doesn't collide with (the game's own have this on the triangles without
 /// area that join strips, with bit 0x8000)
 pub const FACE_NO_COLLISION: u16 = 0x8200;
+/// A triangle a body stands on up to 60 degrees steep, not only 37 (fn_802CEF90: a face is a
+/// floor when its normal's y is above 0.8, or above 0.5 with all of these bits)
+pub const FACE_STEEP: u16 = 0x78;
 pub const FLAG_COLLIDES: u32 = 0x100;
 /// A strip's flags: seen from its front only, as nearly all of the game's own levels' are, or
 /// from both sides (the game's test level)

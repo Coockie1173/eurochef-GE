@@ -69,6 +69,9 @@ eurochef-cli ge edges mt_yard.edb
 - A mesh or node named `collision_add...` or `col_add...` isn't drawn either, and is collided
   with on top of everything else that is: the drawn triangles keep their collision. A ramp over
   stairs is a `collision_add_ramp` and a material with `nocollide` in its name on the steps.
+- A mesh or node named `collision_add_steep...` or `col_add_steep...` is added collision too,
+  but a body stands on it up to 60 degrees steep where the rest is a wall past 37 (its triangles
+  get the flags 0x78). Nothing past 60 is stood on.
 - A node named `spawn...` or `player_start...` is where the player starts. Without one: the
   floor in the middle of the scene.
 - A node named `mp_spawn...` is a spawn point of a multiplayer game (`mp_spawn`,

@@ -10,7 +10,8 @@
 //! material that isn't told otherwise): a material with `twosided` or `nocull` in its name is
 //! drawn from behind as well. Meshes or nodes
 //! whose name starts with `collision_add` or `col_add` aren't drawn either and are collided
-//! with on top of whatever else is: a ramp over stairs whose steps are `nocollide`. A node whose
+//! with on top of whatever else is: a ramp over stairs whose steps are `nocollide`. Those named
+//! `collision_add_steep` or `col_add_steep` can be stood on up to 60 degrees steep, not 37. A node whose
 //! name starts with `spawn` or `player_start` is where the player starts. A node whose name
 //! starts with `mp_spawn` is a spawn point of a multiplayer game, looking along the node's own
 //! +z (Blender's -y); `mp_spawn_team0...` and `mp_spawn_team1...` are a team's. A node whose name
@@ -136,6 +137,15 @@ fn is_added_collision_name(name: Option<&str>) -> bool {
     name.map(|n| {
         let n = n.to_lowercase();
         n.starts_with("collision_add") || n.starts_with("col_add")
+    })
+    .unwrap_or(false)
+}
+
+/// Added collision that is stood on up to 60 degrees steep
+fn is_steep_collision_name(name: Option<&str>) -> bool {
+    name.map(|n| {
+        let n = n.to_lowercase();
+        n.starts_with("collision_add_steep") || n.starts_with("col_add_steep")
     })
     .unwrap_or(false)
 }
@@ -455,6 +465,8 @@ struct Inherited {
     collision: bool,
     /// Its collision is added to the rest
     added: bool,
+    /// Its collision is stood on up to 60 degrees steep
+    steep: bool,
     room: Option<usize>,
     /// The portal its triangles are
     portal: Option<usize>,
@@ -604,7 +616,8 @@ impl Importer<'_> {
             self.scene.part_points.push((number, hash, nth, [-p[0] * scale, p[1] * scale, p[2] * scale]));
         }
         let mut part = inherited;
-        part.added |= is_added_collision_name(node.name());
+        part.steep |= is_steep_collision_name(node.name());
+        part.added |= part.steep || is_added_collision_name(node.name());
         part.collision |= part.added || is_collision_name(node.name());
         let mesh_name = node.mesh().and_then(|m| m.name().map(|n| n.to_string()));
         part.sky |= is_sky_name(node.name()) || is_sky_name(mesh_name.as_deref());
@@ -661,7 +674,8 @@ impl Importer<'_> {
 
         if let Some(mesh) = node.mesh() {
             let mut part = part;
-            part.added |= is_added_collision_name(mesh.name());
+            part.steep |= is_steep_collision_name(mesh.name());
+            part.added |= part.steep || is_added_collision_name(mesh.name());
             part.collision |= part.added || is_collision_name(mesh.name());
             let skin = if self.options.parts { node.skin().map(|s| self.skin_parts(&s)) } else { None };
             for primitive in mesh.primitives() {
@@ -804,7 +818,13 @@ impl Importer<'_> {
             return Ok(());
         }
         if part.collision && !is_sky {
-            let list = if part.added { &mut self.scene.added_collision } else { &mut self.scene.collision };
+            let list = if part.steep {
+                &mut self.scene.steep_collision
+            } else if part.added {
+                &mut self.scene.added_collision
+            } else {
+                &mut self.scene.collision
+            };
             for t in triangles {
                 list.push([positions[t[0]], positions[t[1]], positions[t[2]]]);
             }
