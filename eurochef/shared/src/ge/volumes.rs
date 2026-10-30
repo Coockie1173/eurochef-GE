@@ -12,8 +12,11 @@
 //!   there breaks Continue Game, and entrance 1 of it is the credits.
 //!   The page reads a level's row in the game's table, which a made level hasn't got: the port
 //!   gives it one for the page, on a real Wii or Dolphin it would crash there
+//! - type 3, the generic trigger, asleep (game flag 1) so the game never runs it: a teleport, only
+//!   the port reads it. Data 0 as above, data 1 `TELE`, data 5 to 7 where it goes and data 8 the
+//!   way to face there (floats). The type's maker changes data 0 and 4
 //!
-//! All three hold 0x42000000 or 0x43000001 and 0x41080000 in the values nobody here knows, as
+//! The first three hold 0x42000000 or 0x43000001 and 0x41080000 in the values nobody here knows, as
 //! every one of the game's own does.
 
 use anyhow::{bail, ensure};
@@ -33,6 +36,8 @@ const LEVEL_GO: u32 = 0x80;
 const LEVEL_WON: u32 = 0x90;
 
 const BHOP_MARK: u32 = 0x42484F50;
+const TELEPORT_MARK: u32 = 0x54454C45;
+const TELEPORT_FIRST_VALUE: usize = 5;
 const BHOP_FIRST_VALUE: usize = 5;
 
 const DEFAULT_DAMAGE: u32 = 10;
@@ -54,6 +59,8 @@ pub enum VolumeKind {
     Finish { next: Option<u32> },
     /// Goes on to another level, no page
     Level { hash: u32, entrance: u32 },
+    /// Puts whoever walks in at `to`, facing `yaw`
+    Teleport { to: [f32; 3], yaw: f32 },
 }
 
 impl VolumeKind {
@@ -121,6 +128,15 @@ impl SceneVolume {
                 trigger.data[3] = Some(LEVEL_GO);
                 trigger.data[4] = Some(0x43000001);
             }
+            VolumeKind::Teleport { to, yaw } => {
+                trigger.type_id = TRIGGER_GENERIC;
+                trigger.game_flags = 1;
+                trigger.data[1] = Some(TELEPORT_MARK);
+                trigger.data[15] = None;
+                for (slot, value) in to.into_iter().chain([yaw]).enumerate() {
+                    trigger.data[TELEPORT_FIRST_VALUE + slot] = Some(value.to_bits());
+                }
+            }
         }
         trigger
     }
@@ -185,6 +201,37 @@ pub fn volume_of_name(name: &str) -> anyhow::Result<Option<(VolumeKind, bool)>> 
     Ok(Some((kind, sphere)))
 }
 
+/// What pairs a `teleport_<name>` with its `destination_<name>`: the name after that prefix,
+/// without `sphere` or Blender's .001, so copies of a volume share a destination
+fn pair_of(name: &str, prefix: &str) -> Option<String> {
+    let rest = name.to_lowercase().strip_prefix(prefix)?.to_string();
+    let rest = rest.split('.').next().unwrap_or("").to_string();
+    Some(rest.split('_').filter(|w| !w.is_empty() && *w != "sphere").collect::<Vec<_>>().join("_"))
+}
+
+/// A `teleport_<name>` volume's name, and whether it is a sphere. None for any other name
+pub fn teleport_of_name(name: &str) -> anyhow::Result<Option<(String, bool)>> {
+    let Some(pair) = pair_of(name, "teleport_") else {
+        return Ok(None);
+    };
+    ensure!(!pair.is_empty(), "{name}: a teleport is teleport_<name>, going to destination_<name>");
+    let sphere = name.to_lowercase().split('.').next().unwrap_or("").split('_').any(|w| w == "sphere");
+    Ok(Some((pair, sphere)))
+}
+
+/// A `destination_<name>` node's name. None for any other name
+pub fn destination_of_name(name: &str) -> anyhow::Result<Option<String>> {
+    let Some(pair) = pair_of(name, "destination_") else {
+        return Ok(None);
+    };
+    ensure!(!pair.is_empty(), "{name}: a destination is destination_<name>, for teleport_<name>");
+    Ok(Some(pair))
+}
+
+pub fn is_teleport(trigger: &GeTrigger) -> bool {
+    trigger.type_id == TRIGGER_GENERIC && trigger.data[1] == Some(TELEPORT_MARK)
+}
+
 /// The bunnyhop tunables of a map's preset, in the order the port has them and as they are
 /// called in a node's name
 pub const BHOP_VALUES: [&str; 11] =
@@ -192,12 +239,15 @@ pub const BHOP_VALUES: [&str; 11] =
 
 /// A map's own bunnyhop rules: only the port reads them. A trigger of the generic type 3, asleep
 /// (game flag 1) so the game never runs it, with `BHOP` in data 1, data 2 bit 0 for bunnyhopping
-/// on and bit 1 for pre-strafing, and data 5 to 15 the values (floats, the type's maker changes
+/// on, bit 1 for pre-strafing, 2 Half-Life Crouch, 3 Hovering and 4 Ledge Hops, and data 5 to 15 the values (floats, the type's maker changes
 /// data 0 and 4). A value left out is the port's default
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BhopPreset {
     pub on: bool,
     pub prestrafe: bool,
+    pub crouch: bool,
+    pub hover: bool,
+    pub ledge: bool,
     pub values: [Option<f32>; 11],
 }
 
@@ -206,6 +256,9 @@ impl Default for BhopPreset {
         Self {
             on: true,
             prestrafe: true,
+            crouch: false,
+            hover: false,
+            ledge: false,
             values: [None; 11],
         }
     }
@@ -216,7 +269,7 @@ pub fn is_bhop_preset(trigger: &GeTrigger) -> bool {
 }
 
 impl BhopPreset {
-    /// Takes in the words of a name: `speed6_gravity0.8_noprestrafe`, `off`. What a word doesn't
+    /// Takes in the words of a name: `speed6_gravity0.8_noprestrafe_crouch`, `off`. What a word doesn't
     /// mention stays as it was, so a preset can be spread over several nodes
     pub fn read_words(&mut self, name: &str, words: &str) -> anyhow::Result<()> {
         for word in words.to_lowercase().split('_').filter(|w| !w.is_empty()) {
@@ -226,6 +279,12 @@ impl BhopPreset {
                 "off" => self.on = false,
                 "prestrafe" => self.prestrafe = true,
                 "noprestrafe" => self.prestrafe = false,
+                "crouch" => self.crouch = true,
+                "nocrouch" => self.crouch = false,
+                "hover" => self.hover = true,
+                "nohover" => self.hover = false,
+                "ledge" => self.ledge = true,
+                "noledge" => self.ledge = false,
                 _ => {
                     let digits = word.find(|c: char| c.is_ascii_digit() || c == '.' || c == '-').unwrap_or(word.len());
                     let Some(slot) = BHOP_VALUES.iter().position(|v| *v == &word[..digits]) else {
@@ -233,7 +292,7 @@ impl BhopPreset {
                         if digits == 0 && word.chars().all(|c| c.is_ascii_digit() || c == '.') {
                             continue;
                         }
-                        bail!("{name}: no bhop value \"{word}\", they are {} (speed6), on, off and noprestrafe", BHOP_VALUES.join(", "));
+                        bail!("{name}: no bhop value \"{word}\", they are {} (speed6), on, off, noprestrafe, crouch, hover and ledge", BHOP_VALUES.join(", "));
                     };
                     let Some(value) = number_of(&word[digits..]) else {
                         bail!("{name}: \"{word}\" has no number");
@@ -249,7 +308,7 @@ impl BhopPreset {
         let mut trigger = GeTrigger::new(TRIGGER_GENERIC, [0.0; 3]);
         trigger.game_flags = 1;
         trigger.data[1] = Some(BHOP_MARK);
-        trigger.data[2] = Some(self.on as u32 | (self.prestrafe as u32) << 1);
+        trigger.data[2] = Some(self.on as u32 | (self.prestrafe as u32) << 1 | (self.crouch as u32) << 2 | (self.hover as u32) << 3 | (self.ledge as u32) << 4);
         for (slot, value) in self.values.iter().enumerate() {
             trigger.data[BHOP_FIRST_VALUE + slot] = value.map(f32::to_bits);
         }
@@ -325,6 +384,31 @@ mod tests {
     }
 
     #[test]
+    fn teleports() {
+        assert_eq!(teleport_of_name("teleports").unwrap(), None);
+        assert_eq!(teleport_of_name("Teleport_Roof").unwrap(), Some(("roof".to_string(), false)));
+        assert_eq!(teleport_of_name("teleport_top_floor_sphere.002").unwrap(), Some(("top_floor".to_string(), true)));
+        assert!(teleport_of_name("teleport_").is_err());
+        assert_eq!(destination_of_name("destination_top_floor.001").unwrap(), Some("top_floor".to_string()));
+        assert_eq!(destination_of_name("spawn").unwrap(), None);
+        let volume = SceneVolume {
+            name: String::new(),
+            kind: VolumeKind::Teleport { to: [1.0, 2.0, 3.0], yaw: 0.5 },
+            sphere: false,
+            position: [0.0; 3],
+            half: [1.0; 3],
+            rotation: [0.0; 3],
+        };
+        let trigger = volume.trigger(true);
+        assert!(is_teleport(&trigger) && trigger.shape.is_some());
+        assert_eq!(trigger.game_flags, 1);
+        assert_eq!(trigger.data[1], Some(0x54454C45));
+        assert_eq!(trigger.data[5], Some(1f32.to_bits()));
+        assert_eq!(trigger.data[8], Some(0.5f32.to_bits()));
+        assert_eq!(trigger.data[15], None);
+    }
+
+    #[test]
     fn bhop_words() {
         let mut preset = BhopPreset::default();
         preset.read_words("n", "speed6_gravity0.8.001_noprestrafe").unwrap();
@@ -342,6 +426,10 @@ mod tests {
         assert_eq!(trigger.data[0], None);
         assert_eq!(trigger.data[4], None);
         assert_eq!(trigger.data[15], Some(4.001f32.to_bits()));
+        preset.read_words("n", "crouch_hover.001_ledge").unwrap();
+        assert_eq!(preset.trigger().data[2], Some(0b11101));
+        preset.read_words("n", "nocrouch_nohover_noledge").unwrap();
+        assert_eq!(preset.trigger().data[2], Some(1));
         assert!(preset.read_words("n", "jump3").is_err());
         assert!(preset.read_words("n", "speed").is_err());
     }

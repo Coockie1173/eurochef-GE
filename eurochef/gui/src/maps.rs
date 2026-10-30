@@ -583,17 +583,19 @@ enum NewVolume {
     Death,
     Damage,
     Finish,
+    Teleport,
     Bhop,
 }
 
 impl NewVolume {
-    const ALL: [Self; 4] = [Self::Death, Self::Damage, Self::Finish, Self::Bhop];
+    const ALL: [Self; 5] = [Self::Death, Self::Damage, Self::Finish, Self::Teleport, Self::Bhop];
 
     fn name(self) -> &'static str {
         match self {
             Self::Death => "Death",
             Self::Damage => "Damage",
             Self::Finish => "Mission finish",
+            Self::Teleport => "Teleport",
             Self::Bhop => "Bhop preset",
         }
     }
@@ -604,6 +606,7 @@ impl NewVolume {
             Self::Death => VolumeKind::Death,
             Self::Damage => VolumeKind::Damage { amount: 10, seconds: 1.0 },
             Self::Finish => VolumeKind::Finish { next: None },
+            Self::Teleport => VolumeKind::Teleport { to: position, yaw: 0.0 },
         };
         SceneVolume {
             name: self.name().to_string(),

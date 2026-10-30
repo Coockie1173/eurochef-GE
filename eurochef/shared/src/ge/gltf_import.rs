@@ -25,6 +25,9 @@
 //! (see `volumes`), a box around its mesh turned as the node is, or for an empty the box Blender
 //! draws for a cube empty.
 //!
+//! A node named `teleport_<name>` is a volume as well, that puts whoever walks in at the node
+//! `destination_<name>`, looking along that node's own +z (Blender's -y).
+//!
 //! A node whose name starts with `bhop_` is no place: its words are the level's own bunnyhop
 //! rules, which the port plays by in that level (see `volumes`): `bhop_speed6_gravity0.8`.
 //!
@@ -55,7 +58,7 @@ use anyhow::Context;
 use image::RgbaImage;
 
 use super::{
-    volumes::{rotation_from_axes, volume_of_name, SceneVolume, VolumeKind},
+    volumes::{destination_of_name, rotation_from_axes, teleport_of_name, volume_of_name, SceneVolume, VolumeKind},
     geomap::{ladder_of, rim_edges, GeScene, ModeItemKind, SceneModeItem, ScenePortal, SceneSpawn, SceneTriangle, EDGE_CLIMB, EDGE_LADDER_TOP, EDGE_LONG_VAULT, EDGE_VAULT},
     mesh::{GeVertex, COLOUR_ONE},
     texture::GeTexture,
@@ -458,6 +461,10 @@ struct Importer<'a> {
     lightmapped: usize,
     /// Triangles of lamps that had a lightmap and are drawn without it
     lamps_unmapped: usize,
+    /// The `destination_` nodes by name: where they are, the way they look
+    destinations: HashMap<String, ([f32; 3], f32)>,
+    /// The teleports' places in the scene's volumes and the destinations they name
+    teleports: Vec<(usize, String)>,
 }
 
 /// A gun's rig: for each joint, what takes a vertex into its space and the part it is
@@ -620,6 +627,21 @@ impl Importer<'_> {
         let matrix = multiply(parent, &node.transform().matrix());
         if let Some(words) = node.name().and_then(|n| n.to_lowercase().strip_prefix("bhop_").map(str::to_string)) {
             self.scene.bhop.get_or_insert_with(Default::default).read_words(node.name().unwrap_or(""), &words)?;
+            return Ok(());
+        }
+        if let Some(pair) = destination_of_name(node.name().unwrap_or(""))? {
+            let p = transform_point(&matrix, [0.0, 0.0, 0.0]);
+            let ahead = transform_direction(&matrix, [0.0, 0.0, 1.0]);
+            let scale = self.options.scale;
+            let spot = ([-p[0] * scale, p[1] * scale, p[2] * scale], (-ahead[0]).atan2(ahead[2]));
+            anyhow::ensure!(self.destinations.insert(pair, spot).is_none(), "{}: there's another destination of that name", node.name().unwrap_or(""));
+            return Ok(());
+        }
+        if let Some((pair, sphere)) = teleport_of_name(node.name().unwrap_or(""))? {
+            // the destination can come later in the file
+            let volume = self.volume(node, &matrix, VolumeKind::Teleport { to: [0.0; 3], yaw: 0.0 }, sphere)?;
+            self.teleports.push((self.scene.volumes.len(), pair));
+            self.scene.volumes.push(volume);
             return Ok(());
         }
         if let Some((kind, sphere)) = volume_of_name(node.name().unwrap_or(""))? {
@@ -1033,6 +1055,8 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         lightmaps: HashMap::new(),
         lightmapped: 0,
         lamps_unmapped: 0,
+        destinations: HashMap::new(),
+        teleports: vec![],
     };
 
     let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
@@ -1058,6 +1082,12 @@ pub fn import_gltf<P: AsRef<Path>>(path: P, options: &ImportOptions) -> anyhow::
         for node in scene.nodes() {
             importer.node(&node, &top, Inherited { shrink: shrink.unwrap_or(0.0), ..Default::default() })?;
         }
+    }
+    for (volume, pair) in std::mem::take(&mut importer.teleports) {
+        let Some(&(to, yaw)) = importer.destinations.get(&pair) else {
+            anyhow::bail!("{}: there's no node destination_{pair} to go to", importer.scene.volumes[volume].name);
+        };
+        importer.scene.volumes[volume].kind = VolumeKind::Teleport { to, yaw };
     }
     let mut by_texture: HashMap<usize, Vec<[[f32; 2]; 3]>> = HashMap::new();
     for t in importer.lightmaps.values().flatten() {

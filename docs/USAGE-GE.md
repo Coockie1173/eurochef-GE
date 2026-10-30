@@ -311,10 +311,22 @@ That's `KIND:x,y,z:WIDTH,HEIGHT,DEPTH`, the last three being half the sides, and
 
 To see them in the game, turn on the Trigger Viewer cheat (`GE_TRIGGERS=1`).
 
+## Teleports
+A mesh or an empty named `teleport_<name>` puts whoever touches it at the node named `destination_<name>`. Name them as you like: `teleport_roof` goes to `destination_roof`, `teleport_top_floor` to `destination_top_floor`.
+
+- The volume is a volume as above: its box is the mesh's, an empty's is 2 by 2 by 2, and `teleport_roof_sphere` is a sphere. It isn't drawn or collided with.
+- The destination is the spot the player's feet end up on, and they look along its arrow: Blender's -y, as with `mp_spawn`. Use an empty. Stand it a little above the floor.
+- The player stops dead on arrival, bunnyhop speed included, and takes no fall damage from what came before.
+- Several teleports can go to one destination: copies (`teleport_roof.001`) do by themselves. Two destinations of one name, or a teleport with no destination, stop the import with a message.
+- Don't put a destination inside a teleport: the player would go off again each frame.
+- They work in single player and in every gamemode file of the map, for each player. Only this port reads them: on a real Wii or in Dolphin they do nothing.
+
+For a level that is already built: `eurochef-cli ge edit-triggers mt_yard.edb -o out.edb --teleport 0,1,0:2,2,2:30,5,-10:1.57`. That's `x,y,z:WIDTH,HEIGHT,DEPTH:TOX,TOY,TOZ` and optionally the way to look in radians, x as the game has it. The Entities window's *Volume* row has *Teleport* as well: the destination starts at the camera, in Value 5 to 7, with the way to look in Value 8, all floats.
+
 ## A map's own bunnyhop rules
 An empty whose name starts with `bhop_` sets the bunnyhop rules for this map. It doesn't matter where it stands. While the map is loaded the game plays by these and the F1 Bunnyhopping page shows them locked, as *The map's*. Your own settings aren't touched and are back the moment the map is left.
 
-`bhop_speed6_gravity0.8` turns bunnyhopping on, even for someone who has it off, with those two values and the defaults for all the others. Blender cuts names at 63 characters, so use several empties if you run out: `bhop_speed6_gravity0.8` and `bhop_aircap2_noprestrafe` are one preset.
+`bhop_speed6_gravity0.8` turns bunnyhopping on, even for someone who has it off, with those two values and the defaults for all the others. Blender cuts names at 63 characters, so use several empties if you run out: `bhop_speed6_gravity0.8` and `bhop_aircap2_noprestrafe` are one preset. Half-Life Crouch, Hovering and Ledge Hops are off unless a word turns them on, whatever the player has picked.
 
 | Word | Setting in the game |
 |---|---|
@@ -331,6 +343,9 @@ An empty whose name starts with `bhop_` sets the bunnyhop rules for this map. It
 | `friction` | Friction |
 | `off` | Bunnyhopping off for this map |
 | `noprestrafe` | Pre-strafing off |
+| `crouch` | Half-Life Crouch on |
+| `hover` | Hovering on |
+| `ledge` | Ledge Hops on |
 
 A value is held to the range its slider has in the game. A misspelt word stops the import with a message. The level timer doesn't flash grey on a map's rules, since they aren't a player's changes. Every gamemode file of the map gets the preset too: a host plays by it and sends it to the others.
 

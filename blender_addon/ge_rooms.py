@@ -34,7 +34,7 @@ bl_info = {
 BOX_PREFIX = "ref_roombox"
 ROOM_LAYER = "ge_room"
 # what isn't a room's geometry: left where it is
-HELPERS = ("portal", "collision", "col_", "ucx_", "vault", "climb", "ladder", "reference", "ref_", "lightmap", "sky", "spawn", "mp_spawn", "player_start")
+HELPERS = ("portal", "collision", "col_", "ucx_", "vault", "climb", "ladder", "reference", "ref_", "lightmap", "sky", "spawn", "mp_spawn", "player_start", "teleport", "destination")
 # the game keeps a zone's number in a byte
 MAX_ROOMS = 255
 # how far from a plane a vertex is that counts as on it

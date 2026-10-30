@@ -11,7 +11,7 @@ use eurochef_shared::ge::{
     project::{new_map_from_gltf, NewMapOptions},
     sky::{self, SkyOptions},
     triggers::{read_triggers, write_triggers, GeTrigger},
-    volumes::{is_bhop_preset, volume_of_name, BhopPreset, SceneVolume, TRIGGER_DAMAGE_ZONE, TRIGGER_DEATH_BARRIER, TRIGGER_LEVEL_CHANGE},
+    volumes::{is_bhop_preset, is_teleport, volume_of_name, BhopPreset, SceneVolume, VolumeKind, TRIGGER_DAMAGE_ZONE, TRIGGER_DEATH_BARRIER, TRIGGER_LEVEL_CHANGE},
     weapon::{base_gun, build_weapon, locator_name, read_base, BASE_GUNS},
 };
 
@@ -367,8 +367,13 @@ pub enum GeCommand {
         #[arg(long, allow_hyphen_values = true)]
         volume: Vec<String>,
 
+        /// Add a teleport: "x,y,z:WIDTH,HEIGHT,DEPTH:TOX,TOY,TOZ" or with ":YAW" behind that, the
+        /// way to look when there, in radians
+        #[arg(long, allow_hyphen_values = true)]
+        teleport: Vec<String>,
+
         /// Add the level's own bunnyhop rules, what comes after bhop_ in a scene:
-        /// speed6_gravity0.8_noprestrafe. Replaces a preset the file has
+        /// speed6_gravity0.8_noprestrafe_crouch_hover_ledge. Replaces a preset the file has
         #[arg(long)]
         bhop: Option<String>,
 
@@ -430,6 +435,8 @@ fn describe(index: usize, t: &GeTrigger) -> String {
     );
     if is_bhop_preset(t) {
         line += "  bhop preset";
+    } else if is_teleport(t) {
+        line += "  teleport";
     } else if let Some(name) = volume_type_name(t.type_id) {
         line += &format!("  {name}");
     }
@@ -728,6 +735,7 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             copy,
             add,
             volume,
+            teleport,
             bhop,
             mut remove,
         } => {
@@ -780,6 +788,25 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
                     name,
                     kind,
                     sphere,
+                    position: parse_vec3(position)?,
+                    half,
+                    rotation: [0.0, -0.0, -0.0],
+                };
+                triggers.triggers.push(scene.trigger(false));
+            }
+            for t in &teleport {
+                let parsed: Vec<&str> = t.split(':').collect();
+                let (position, half, to, yaw) = match parsed[..] {
+                    [position, half, to] => (position, half, to, 0.0),
+                    [position, half, to, yaw] => (position, half, to, yaw.parse()?),
+                    _ => anyhow::bail!("\"{t}\" isn't x,y,z:WIDTH,HEIGHT,DEPTH:TOX,TOY,TOZ[:YAW]"),
+                };
+                let half = parse_vec3(half)?;
+                anyhow::ensure!(half.iter().all(|h| *h > 0.0), "{t}: a volume can't be flat");
+                let scene = SceneVolume {
+                    name: t.clone(),
+                    kind: VolumeKind::Teleport { to: parse_vec3(to)?, yaw },
+                    sphere: false,
                     position: parse_vec3(position)?,
                     half,
                     rotation: [0.0, -0.0, -0.0],

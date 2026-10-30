@@ -274,8 +274,13 @@ in data 1 becomes where Continue Game goes, so 01080004 there breaks that (and i
 the credits): `volume_finish` names its own level.
 
 A preset of a map's bunnyhop rules is the port's alone: type 3 with game flag 1, so the game never
-runs it. Data 1 `BHOP` (42484F50), data 2 bit 0 on and bit 1 pre-strafing, data 5 to 15 the tunables
+runs it. Data 1 `BHOP` (42484F50), data 2 bit 0 on, bit 1 pre-strafing, 2 Half-Life Crouch, 3 Hovering and
+4 Ledge Hops, data 5 to 15 the tunables
 as floats, left out for a default. Data 0 and 4 are changed by the type's maker.
+
+A teleport is the port's alone as well: type 3 with game flag 1 and a shape, data 1 `TELE`
+(54454C45), data 5 to 7 where it goes and data 8 the yaw, as floats. Data 0 is its range, which the
+port doesn't look at: it asks `fn_80024450`, the shape's test, directly.
 
 `ge edit-triggers` writes the new triggers behind the end of the file and points the map at
 them, so it only works on files that are loaded as a whole (all of the game's `mt_` level
