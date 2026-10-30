@@ -11,6 +11,7 @@ use eurochef_shared::ge::{
     project::{new_map_from_gltf, NewMapOptions},
     sky::{self, SkyOptions},
     triggers::{read_triggers, write_triggers, GeTrigger},
+    volumes::{is_bhop_preset, volume_of_name, BhopPreset, SceneVolume, TRIGGER_DAMAGE_ZONE, TRIGGER_DEATH_BARRIER, TRIGGER_LEVEL_CHANGE},
     weapon::{base_gun, build_weapon, locator_name, read_base, BASE_GUNS},
 };
 
@@ -360,6 +361,17 @@ pub enum GeCommand {
         #[arg(long, allow_hyphen_values = true)]
         add: Vec<String>,
 
+        /// Add a trigger volume: "KIND:x,y,z:WIDTH,HEIGHT,DEPTH". KIND is what comes after
+        /// volume_ in a scene: death, damage_25_0.5, finish, finish_0181013F, level_0181013F_2
+        /// and sphere (death_sphere). WIDTH, HEIGHT and DEPTH are half the box's sides
+        #[arg(long, allow_hyphen_values = true)]
+        volume: Vec<String>,
+
+        /// Add the level's own bunnyhop rules, what comes after bhop_ in a scene:
+        /// speed6_gravity0.8_noprestrafe. Replaces a preset the file has
+        #[arg(long)]
+        bhop: Option<String>,
+
         /// Remove a trigger by index (as listed before any change), can be given several times
         #[arg(long)]
         remove: Vec<usize>,
@@ -390,6 +402,15 @@ fn parse_value(s: &str) -> anyhow::Result<Option<u32>> {
     Ok(Some(parse_int::parse::<u32>(s)?))
 }
 
+fn volume_type_name(type_id: u32) -> Option<&'static str> {
+    match type_id {
+        TRIGGER_DEATH_BARRIER => Some("death"),
+        TRIGGER_DAMAGE_ZONE => Some("damage"),
+        TRIGGER_LEVEL_CHANGE => Some("level change"),
+        _ => None,
+    }
+}
+
 fn describe(index: usize, t: &GeTrigger) -> String {
     let mut line = format!(
         "{index:3}  type {:3} (0x{:02x}){}  at {:9.3} {:9.3} {:9.3}  rot {:6.3} {:6.3} {:6.3}",
@@ -407,6 +428,11 @@ fn describe(index: usize, t: &GeTrigger) -> String {
         t.rotation[1],
         t.rotation[2],
     );
+    if is_bhop_preset(t) {
+        line += "  bhop preset";
+    } else if let Some(name) = volume_type_name(t.type_id) {
+        line += &format!("  {name}");
+    }
     if t.game_flags != 0 {
         line += &format!("  flags 0x{:x}", t.game_flags);
     }
@@ -499,6 +525,9 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             }
             if map.stats.multiplayer_spawns > 0 {
                 println!("{} multiplayer spawn points", map.stats.multiplayer_spawns);
+            }
+            if map.stats.volumes > 0 {
+                println!("{} trigger volumes", map.stats.volumes);
             }
             if map.stats.sky_triangles > 0 {
                 println!("a sky of {} triangles", map.stats.sky_triangles);
@@ -698,6 +727,8 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             set,
             copy,
             add,
+            volume,
+            bhop,
             mut remove,
         } => {
             let data = std::fs::read(&filename).with_context(|| format!("couldn't read {filename}"))?;
@@ -735,6 +766,31 @@ pub fn execute_command(cmd: GeCommand) -> anyhow::Result<()> {
             for a in &add {
                 let (type_id, pos) = parse_indexed_vec3(a)?;
                 triggers.triggers.push(GeTrigger::with_defaults(type_id, pos));
+            }
+            for v in &volume {
+                let parsed: Vec<&str> = v.split(':').collect();
+                let [kind, position, half] = parsed[..] else {
+                    anyhow::bail!("\"{v}\" isn't KIND:x,y,z:WIDTH,HEIGHT,DEPTH");
+                };
+                let name = format!("volume_{kind}");
+                let (kind, sphere) = volume_of_name(&name)?.context("a volume's kind")?;
+                let half = parse_vec3(half)?;
+                anyhow::ensure!(half.iter().all(|h| *h > 0.0) || sphere, "{name}: a volume can't be flat");
+                let scene = SceneVolume {
+                    name,
+                    kind,
+                    sphere,
+                    position: parse_vec3(position)?,
+                    half,
+                    rotation: [0.0, -0.0, -0.0],
+                };
+                triggers.triggers.push(scene.trigger(false));
+            }
+            if let Some(words) = bhop {
+                let mut preset = BhopPreset::default();
+                preset.read_words("--bhop", &words)?;
+                triggers.retain(|t| !is_bhop_preset(t));
+                triggers.triggers.push(preset.trigger());
             }
             remove.sort_unstable();
             remove.dedup();

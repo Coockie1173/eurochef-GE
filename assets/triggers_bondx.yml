@@ -6,6 +6,32 @@ triggers:
   0:
     name: OB_Static
     icon: OB_Static
+  0x0C:
+    name: TR_LevelChange
+    icon: TR_Link
+    values:
+      0: { name: Range, type: u32 }
+      1: { name: Level, type: hashcode }
+      2: { name: Entrance, type: u32 }
+      3: { name: How, type: u32 }
+
+  0x10:
+    name: TR_DamageZone
+    icon: TR_Link
+    values:
+      0: { name: Range, type: u32 }
+      2: { name: Damage, type: u32 }
+      3: { name: Seconds, type: float }
+      4: { name: Who, type: u32 }
+      5: { name: Flags, type: u32 }
+
+  0x13:
+    name: TR_DeathBarrier
+    icon: TR_Link
+    values:
+      0: { name: Range, type: u32 }
+      2: { name: Who, type: u32 }
+
   0x1C:
     name: SP_Spawn
     icon: PL_StartPoint

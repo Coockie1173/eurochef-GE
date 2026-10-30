@@ -11,7 +11,13 @@ use eurochef_edb::{
     versions::Platform,
     Hashcode,
 };
-use eurochef_shared::IdentifiableResult;
+use eurochef_shared::{
+    ge::{
+        triggers::{GeTrigger, TriggerShape},
+        volumes::{volume_range, BhopPreset, SceneVolume, VolumeKind, TRIGGER_DAMAGE_ZONE, TRIGGER_DEATH_BARRIER, TRIGGER_LEVEL_CHANGE},
+    },
+    IdentifiableResult,
+};
 use glam::Vec3;
 use nohash_hasher::IntMap;
 
@@ -224,6 +230,46 @@ impl MapViewerPanel {
                         editor.changed = true;
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Volume");
+                    egui::ComboBox::from_id_source("volume_kind")
+                        .selected_text(editor.volume_kind.name())
+                        .show_ui(ui, |ui| {
+                            for kind in NewVolume::ALL {
+                                ui.selectable_value(&mut editor.volume_kind, kind, kind.name());
+                            }
+                        });
+                    if ui.button("Add at the camera").clicked() {
+                        let trigger = editor.volume_kind.trigger(camera.into(), editor.volume_half);
+                        let mut engine_options = EXGeoTriggerEngineOptions::default();
+                        // a preset is no place, it has no shape
+                        engine_options.collision_index = trigger.shape.map(|shape| next_shape(map, datum_of(&shape)));
+                        map.triggers.push(ProcessedTrigger {
+                            link_ref: -1,
+                            ttype: trigger.type_id,
+                            tsubtype: None,
+                            raw_subtype: 0,
+                            debug: 0,
+                            game_flags: trigger.game_flags,
+                            trig_flags: 0,
+                            position: camera,
+                            rotation: Vec3::new(0.0, -0.0, -0.0),
+                            scale: Vec3::ONE,
+                            data: trigger.data.to_vec(),
+                            links: vec![-1; 8],
+                            engine_options,
+                            incoming_links: vec![],
+                        });
+                        selected = Some(map.triggers.len() - 1);
+                        editor.changed = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Half its sides");
+                    for axis in &mut editor.volume_half {
+                        ui.add(egui::DragValue::new(axis).speed(0.05).clamp_range(0.05..=500.0).max_decimals(2));
+                    }
+                });
                 ui.separator();
 
                 match selected {
@@ -257,6 +303,31 @@ impl MapViewerPanel {
                                     .add(egui::DragValue::new(&mut trigger.game_flags).hexadecimal(1, false, false))
                                     .changed();
                                 ui.end_row();
+                                // a volume's box, the range the game looks at it in follows
+                                let datum = trigger
+                                    .engine_options
+                                    .collision_index
+                                    .filter(|_| matches!(trigger.ttype, TRIGGER_DEATH_BARRIER | TRIGGER_DAMAGE_ZONE | TRIGGER_LEVEL_CHANGE))
+                                    .and_then(|c| map.trigger_collisions.get_mut(c as usize))
+                                    .filter(|d| d.dtype == 0);
+                                if let Some(datum) = datum {
+                                    ui.label("Half its sides");
+                                    let mut resized = false;
+                                    ui.horizontal(|ui| {
+                                        for axis in &mut datum.extents {
+                                            resized |= ui
+                                                .add(egui::DragValue::new(axis).speed(0.05).clamp_range(0.05..=500.0).max_decimals(2))
+                                                .changed();
+                                        }
+                                    });
+                                    ui.end_row();
+                                    if resized {
+                                        if let Some(range) = trigger.data.first_mut() {
+                                            *range = Some(volume_range(TriggerShape::cuboid(datum.extents).reach()));
+                                        }
+                                        editor.changed = true;
+                                    }
+                                }
                             });
 
                             ui.collapsing("Values", |ui| {
@@ -302,6 +373,15 @@ impl MapViewerPanel {
                             let mut copy = map.triggers[index].clone();
                             copy.position += Vec3::new(1.0, 0.0, 0.0);
                             copy.incoming_links.clear();
+                            // a shape of its own, or resizing one would resize both
+                            if let Some(datum) = copy
+                                .engine_options
+                                .collision_index
+                                .and_then(|c| map.trigger_collisions.get(c as usize))
+                                .cloned()
+                            {
+                                copy.engine_options.collision_index = Some(next_shape(map, datum));
+                            }
                             map.triggers.push(copy);
                             selected = Some(map.triggers.len() - 1);
                             editor.changed = true;
@@ -461,17 +541,117 @@ impl MapViewerPanel {
         let map = self.maps.first().ok_or_else(|| anyhow::anyhow!("no map"))?;
         let mut set = read_triggers(data)?;
         set.triggers = Self::ge_triggers(map);
+        let used = set.triggers.iter().filter_map(|t| t.engine[3]).map(|i| i as usize + 1).max().unwrap_or(0);
+        if set.shapes.len() < used {
+            set.shapes.resize(used, TriggerShape::cuboid([0.0; 3]));
+        }
+        // the map reader's list can be shorter than the file's: what it doesn't have stays
+        for (shape, datum) in set.shapes.iter_mut().zip(&map.trigger_collisions).take(used) {
+            if datum.hashref != NO_SHAPE {
+                *shape = shape_of(datum);
+            }
+        }
         let out = write_triggers(data, &set)?;
         std::fs::write(target, &out).with_context(|| format!("couldn't write {}", target.display()))?;
         Ok(out.len())
     }
 }
 
-#[derive(Default)]
 struct TriggerEditor {
     new_type: u32,
+    volume_kind: NewVolume,
+    volume_half: [f32; 3],
     changed: bool,
     status: String,
+}
+
+impl Default for TriggerEditor {
+    fn default() -> Self {
+        Self {
+            new_type: 0,
+            volume_kind: NewVolume::Death,
+            volume_half: [2.0, 2.0, 2.0],
+            changed: false,
+            status: String::new(),
+        }
+    }
+}
+
+/// The volumes the Entities window adds. Their values are changed as any trigger's
+#[derive(Clone, Copy, PartialEq)]
+enum NewVolume {
+    Death,
+    Damage,
+    Finish,
+    Bhop,
+}
+
+impl NewVolume {
+    const ALL: [Self; 4] = [Self::Death, Self::Damage, Self::Finish, Self::Bhop];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Death => "Death",
+            Self::Damage => "Damage",
+            Self::Finish => "Mission finish",
+            Self::Bhop => "Bhop preset",
+        }
+    }
+
+    fn trigger(self, position: [f32; 3], half: [f32; 3]) -> GeTrigger {
+        let kind = match self {
+            Self::Bhop => return BhopPreset::default().trigger(),
+            Self::Death => VolumeKind::Death,
+            Self::Damage => VolumeKind::Damage { amount: 10, seconds: 1.0 },
+            Self::Finish => VolumeKind::Finish { next: None },
+        };
+        SceneVolume {
+            name: self.name().to_string(),
+            kind,
+            sphere: false,
+            position,
+            half,
+            rotation: [0.0, -0.0, -0.0],
+        }
+        .trigger(false)
+    }
+}
+
+/// Stands in the map's list for a shape it stopped reading before
+const NO_SHAPE: u32 = 0;
+
+fn datum_of(shape: &TriggerShape) -> EXGeoBaseDatum {
+    EXGeoBaseDatum {
+        hashref: shape.hash,
+        flags: shape.flags,
+        dtype: shape.kind,
+        hash_index: shape.hash_index,
+        extents: shape.extents,
+        position: shape.offset.into(),
+        q: shape.rotation,
+    }
+}
+
+fn shape_of(datum: &EXGeoBaseDatum) -> TriggerShape {
+    TriggerShape {
+        hash: datum.hashref,
+        flags: datum.flags,
+        kind: datum.dtype,
+        hash_index: datum.hash_index,
+        extents: datum.extents,
+        offset: datum.position.into(),
+        rotation: datum.q,
+    }
+}
+
+/// Puts a shape behind every one the map's triggers use, returns its index
+fn next_shape(map: &mut ProcessedMap, datum: EXGeoBaseDatum) -> u32 {
+    let used = map.triggers.iter().filter_map(|t| t.engine_options.collision_index).map(|i| i as usize + 1).max().unwrap_or(0);
+    let index = used.max(map.trigger_collisions.len());
+    let blank = EXGeoBaseDatum { hashref: NO_SHAPE, ..datum.clone() };
+    map.trigger_collisions.resize(index, blank);
+    map.trigger_collisions.push(datum);
+    index as u32
 }
 
 pub fn read_from_file(edb: &mut EdbFile) -> Vec<ProcessedMap> {

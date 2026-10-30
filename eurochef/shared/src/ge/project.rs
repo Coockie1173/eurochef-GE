@@ -68,6 +68,8 @@ pub struct NewMap {
     geometry: Vec<u8>,
     /// One file: the triggers it gets besides the player's spawn point
     more: Vec<GeTrigger>,
+    /// Split: the triggers of the level that is the single player game
+    volumes: Vec<GeTrigger>,
     /// Split: each gamemode's triggers
     mode_triggers: Vec<(GameMode, Vec<GeTrigger>)>,
     /// Split: what every level file gets, the geometry file has none
@@ -145,7 +147,7 @@ impl NewMap {
         if self.split {
             let geometry = free_hash(geometry_hash(self.id), &mut taken);
             self.geometry[4..8].copy_from_slice(&geometry.to_be_bytes());
-            let level = make_trigger_level(self.level_hash, geometry, self.time, self.spawn, &[], &self.edges, &self.ladders)?;
+            let level = make_trigger_level(self.level_hash, geometry, self.time, self.spawn, &self.volumes, &self.edges, &self.ladders)?;
             files.push((level_path, self.level_hash, level, None));
             files.push((geometry_path, geometry, self.geometry.clone(), None));
             for (mode, triggers) in &self.mode_triggers {
@@ -322,7 +324,29 @@ pub fn new_map_from_scene(scene: &GeScene, options: &NewMapOptions) -> anyhow::R
             }
         }
     }
-    let more: Vec<GeTrigger> = anyones.into_iter().chain(teams.into_iter().flatten()).collect();
+    let mut volumes = vec![];
+    let mut more: Vec<GeTrigger> = anyones.into_iter().chain(teams.into_iter().flatten()).collect();
+    // a split map's own level is the single player game, which gets them all. a gamemode's level
+    // gets what hurts, nothing there changes levels
+    stats.volumes = scene.volumes.len();
+    let mut own: Vec<GeTrigger> = scene.volumes.iter().map(|v| v.trigger(false)).collect();
+    // a preset goes with the map whichever way it is played
+    if let Some(bhop) = scene.bhop {
+        own.push(bhop.trigger());
+        for (_, triggers) in &mut per_mode {
+            triggers.push(bhop.trigger());
+        }
+    }
+    for volume in scene.volumes.iter().filter(|v| !v.kind.single_player_only()) {
+        for (_, triggers) in &mut per_mode {
+            triggers.push(volume.trigger(true));
+        }
+    }
+    if options.split {
+        volumes = own;
+    } else {
+        more.extend(own);
+    }
     // the game takes an edge that is 0.5 to 1.5 above the player: the floor in front of it
     stats.edges = scene.edges.len();
     for edge in &scene.edges {
@@ -352,6 +376,7 @@ pub fn new_map_from_scene(scene: &GeScene, options: &NewMapOptions) -> anyhow::R
         split: options.split,
         geometry,
         more,
+        volumes,
         mode_triggers: per_mode,
         edges,
         ladders,

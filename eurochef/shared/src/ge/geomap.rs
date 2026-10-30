@@ -315,6 +315,10 @@ pub struct GeScene {
     pub multiplayer_spawns: Vec<SceneSpawn>,
     /// The golden gun, the consoles and the black box: what only some gamemodes have
     pub mode_items: Vec<SceneModeItem>,
+    /// What does something to whoever walks in: `volumes`
+    pub volumes: Vec<super::volumes::SceneVolume>,
+    /// The level's own bunnyhop rules: `bhop...` nodes
+    pub bhop: Option<super::volumes::BhopPreset>,
     /// What the player vaults over and climbs onto
     pub edges: Vec<SceneEdge>,
     pub ladders: Vec<SceneLadder>,
@@ -332,6 +336,7 @@ pub struct BuildStats {
     pub textures: usize,
     pub sky_triangles: usize,
     pub multiplayer_spawns: usize,
+    pub volumes: usize,
     pub edges: usize,
     pub ladders: usize,
     pub bounds: Option<Bounds>,

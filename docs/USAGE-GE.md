@@ -10,7 +10,7 @@ This document is the "how do I use it" one. If you want to know what the bytes m
 
 # Quick overview
 ## The importer
-Reads a glTF scene (`.gltf` or `.glb`) and turns it into a level: triangles, textures, collision, rooms and portals, a sky, spawn points, things to vault over and ladders. You don't talk to it directly, both the CLI and the viewer use it.
+Reads a glTF scene (`.gltf` or `.glb`) and turns it into a level: triangles, textures, collision, rooms and portals, a sky, spawn points, things to vault over and ladders, trigger volumes and a map's own bunnyhop rules. You don't talk to it directly, both the CLI and the viewer use it.
 It has no settings file and no custom properties. Everything is decided by **what you name things**. This sounds dumb but it means it works from any modelling program that can name an object.
 
 ## The CLI
@@ -276,6 +276,65 @@ Any character can be written there. Every one the game has a name for:
 Only the eight in the first table are heroes in the game's own maps; anyone else as a hero is untried. The placeholder ones (`CAMO RUSSIAN1`, `CHAR #17`...) can be written by those names as well.
 
 Multiplayer spawn points get put on the floor below them. One that hangs over nothing gets a warning, and you want to listen to that one: the game checks every one of them when the level loads, single player too, and stops in an endless loop **on purpose** when one has no floor within a metre below it.
+
+## Trigger volumes
+A place in the level that does something to whoever walks in. A mesh or an empty whose node name starts with `volume_` is one. It isn't drawn or collided with.
+
+| Name | What it does |
+|---|---|
+| `volume_death` | Kills the player and anyone else who walks in |
+| `volume_damage` | Hurts the player, 10 every second |
+| `volume_damage_25_0.5` | The same, 25 every half a second |
+| `volume_finish` | Ends the mission with the Mission Complete page |
+| `volume_finish_0181013F` | The same, and Save and Continue goes on to that level |
+| `volume_level_0181013F` | Goes to that level. `volume_level_0181013F_2` goes to its entrance 2 |
+
+A level's hash is what `ge new-map` prints for one of yours, or the `cut: level change` lines of `GE_TRACE` for the game's own.
+
+- The shape is a box around the mesh, turned and scaled as the node is, so the default cube scaled and turned in Blender is all you need. An empty counts as a box of 2 by 2 by 2 before its scale, which is Blender's cube empty at size 1.
+- Put `sphere` in the name (`volume_death_sphere`) for a sphere, its radius the box's longest half side.
+- Any other word is yours: `volume_death_pit`, and Blender's `.001` is fine too. A kind that doesn't exist (`volume_lava`) stops the import with a message.
+- Death, finish and level go by the player's position, which is at the feet: a thin box in a floor has to reach the feet. Damage goes by the whole body.
+- Damage 25 a second took about 8 seconds to kill the player in a test, so a full bar is around 200.
+- Don't put the spawn point inside a death volume: the player respawns there and dies again forever.
+
+Which files get what: the level you start in single player gets every volume. The gamemode levels of a split map get `death` and `damage` only, since a level change in a match makes no sense. In a gamemode a death volume kills the player of that console only, and each console does its own.
+
+On the Mission Complete page Save and Continue goes to the level you named. A plain `volume_finish` has no next level, so it plays your map again, and that's also where Continue Game goes after saving. Save and Quit goes to the menus either way. The page calls your map `Custom Level : Name`. It only works in this port: the game crashes on that page for a level that isn't in its own level table, and the port gets around that. On a real Wii or in Dolphin use `volume_level` instead, which has no page.
+
+Volumes can also go into a level that is already built:
+```
+eurochef-cli ge edit-triggers mt_yard.edb -o out.edb --volume death:0,-5,0:20,1,20
+eurochef-cli ge edit-triggers mt_yard.edb -o out.edb --volume damage_25_0.5:3,0,3:2,2,2 --volume finish_sphere:10,1,0:2,2,2
+```
+That's `KIND:x,y,z:WIDTH,HEIGHT,DEPTH`, the last three being half the sides, and x as the game has it (the opposite of Blender's). In the viewer the Entities window has a *Volume* row that adds one at the camera. Select it to see its box and change its size, then save the file as usual.
+
+To see them in the game, turn on the Trigger Viewer cheat (`GE_TRIGGERS=1`).
+
+## A map's own bunnyhop rules
+An empty whose name starts with `bhop_` sets the bunnyhop rules for this map. It doesn't matter where it stands. While the map is loaded the game plays by these and the F1 Bunnyhopping page shows them locked, as *The map's*. Your own settings aren't touched and are back the moment the map is left.
+
+`bhop_speed6_gravity0.8` turns bunnyhopping on, even for someone who has it off, with those two values and the defaults for all the others. Blender cuts names at 63 characters, so use several empties if you run out: `bhop_speed6_gravity0.8` and `bhop_aircap2_noprestrafe` are one preset.
+
+| Word | Setting in the game |
+|---|---|
+| `speed` | Base Speed |
+| `height` | Hop Height |
+| `gravity` | Gravity |
+| `aircap` | Air Cap |
+| `airaccel` | Air Accelerate |
+| `wish` | Stick Speed |
+| `max` | Top Speed |
+| `fall` | Fall Damage |
+| `drop` | Free Drop |
+| `groundaccel` | Ground Accelerate |
+| `friction` | Friction |
+| `off` | Bunnyhopping off for this map |
+| `noprestrafe` | Pre-strafing off |
+
+A value is held to the range its slider has in the game. A misspelt word stops the import with a message. The level timer doesn't flash grey on a map's rules, since they aren't a player's changes. Every gamemode file of the map gets the preset too: a host plays by it and sends it to the others.
+
+For a level that is already built: `eurochef-cli ge edit-triggers mt_yard.edb -o out.edb --bhop speed6_gravity0.8` (it replaces a preset the file has). The Entities window's *Volume* row has *Bhop preset* as well, with its values under Values: the flags in Value 2 and the tunables as floats from Value 5 on.
 
 ## Rooms and portals
 Without rooms the level is one zone and the game draws all of it that's in front of the camera, walls or not. With them it draws the room you're in, and through each portal on screen the room behind it.

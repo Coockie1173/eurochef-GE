@@ -320,7 +320,7 @@ impl CollisionDatumRenderer {
             gl.use_program(Some(shader));
 
             let (ebo_tris, ebo_lines, vao, count_tris, count_lines) = match collision.dtype {
-                0 => self.buffers_cube,
+                0 | 1 => self.buffers_cube,
                 // TODO(cohae): Might be a capsule
                 3 => self.buffers_cylinder,
                 _ => return,
@@ -332,6 +332,8 @@ impl CollisionDatumRenderer {
                     collision.extents[0],
                     collision.extents[1],
                 ],
+                // a sphere, as the box around it
+                1 => [collision.extents[0]; 3],
                 _ => collision.extents,
             };
 

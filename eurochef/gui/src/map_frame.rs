@@ -800,7 +800,7 @@ impl MapFrame {
                         .collision_index
                         .and_then(|c| map.trigger_collisions.get(c as usize))
                     {
-                        if coll.dtype == 0 || coll.dtype == 3 {
+                        if coll.dtype == 0 || coll.dtype == 1 || coll.dtype == 3 {
                             collision_renderer.render(
                                 painter.gl(),
                                 &render_context,
@@ -949,6 +949,7 @@ impl MapFrame {
                                     ui.label("Collision");
                                     match coll.dtype {
                                         0 => ui.label("Box"),
+                                        1 => ui.label("Sphere"),
                                         3 => ui.label("Cylinder"),
                                         u => ui.label(format!(
                                             "{} Unknown collision type {}",

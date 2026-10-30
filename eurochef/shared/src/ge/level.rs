@@ -169,18 +169,16 @@ pub fn make_level_of_geometry(
     spawn: [f32; 3],
     more: &[GeTrigger],
 ) -> anyhow::Result<Vec<u8>> {
-    let mut set = read_triggers(geometry)?;
+    let mut geometry = geometry.to_vec();
+    geometry[4..8].copy_from_slice(&level_hash.to_be_bytes());
+    let mut set = read_triggers(&geometry)?;
     ensure!(
         !set.triggers.iter().any(|t| t.type_id == TRIGGER_SPAWN),
         "the file has a spawn point already"
     );
     set.triggers.push(spawn_trigger(spawn));
     set.triggers.extend(more.iter().cloned());
-    let mut w = Writer {
-        buf: write_triggers(geometry, &set)?,
-    };
-    w.set_u32(4, level_hash);
-    Ok(w.buf)
+    write_triggers(&geometry, &set)
 }
 
 /// A level file that loads its geometry from another file, made from the game's own test level

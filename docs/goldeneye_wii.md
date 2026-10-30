@@ -254,6 +254,29 @@ map of another file (`data 0`: the file's hash, `data 1`: 0x05000000), which com
 the level already runs: a large geometry file loaded that way isn't there yet when the
 player spawns. Levels made here are one file.
 
+A trigger's collision (engine value 3, an index) is an entry of 0x30 bytes: a hash (FFFFFFFF on
+most), flags (u16), the kind at +6 (0 box, 1 sphere, 3 capsule, 4 lozenge), the extents at +8 (a
+box's half sides, a sphere's radius), an offset at +0x14 and a quaternion at +0x20, which are
+zero and identity on all of the game's own: it is turned by the trigger's angles. The table has
+no count. A trigger's shape only counts within its range, which each type works out for itself.
+
+The types of a trigger volume (`ge/volumes.rs`, all data values, 0 is a range in tenths):
+
+| Type | Data |
+|---|---|
+| 0x13 death barrier | 2 who (bit 0 the player, bit 1 the others), tested with the player's position |
+| 0x10 damage zone | 2 damage, 3 seconds between hits (float), 4 who, 5 flags (0x40 flash), tested with the body |
+| 0x0C level change | 1 level, 2 entrance, 3 how (0x80 go, 0x10 with it the Mission Complete page, 4 loads the file first), tested with the player's position |
+
+With 0x90 the page (`fn_8025A8F0`) reads the level's row in the level table with no check, and a
+made level has none: the game crashes there, the port gives it a row for the page. The level
+in data 1 becomes where Continue Game goes, so 01080004 there breaks that (and its entrance 1 is
+the credits): `volume_finish` names its own level.
+
+A preset of a map's bunnyhop rules is the port's alone: type 3 with game flag 1, so the game never
+runs it. Data 1 `BHOP` (42484F50), data 2 bit 0 on and bit 1 pre-strafing, data 5 to 15 the tunables
+as floats, left out for a default. Data 0 and 4 are changed by the type's maker.
+
 `ge edit-triggers` writes the new triggers behind the end of the file and points the map at
 them, so it only works on files that are loaded as a whole (all of the game's `mt_` level
 files but `mt_archive*`).

@@ -11,12 +11,22 @@
 //!
 //! Changed triggers are written to the end of the file as a new block and the map is pointed at
 //! it. Everything else in the file is addressed relative to itself and stays where it is.
+//!
+//! A trigger's collision (engine value 3, an index) is 0x30 bytes in the collisions' table: a
+//! hash, flags, a kind (+6), the extents, an offset and a quaternion. Only the kind and the
+//! extents are looked at for the game's own (their offsets are zero, their rotation is the
+//! trigger's): a box has half its sides there, a sphere its radius. The table has no count, the
+//! game goes by the indices. The hash is FFFFFFFF on most, which is what eurochef's map reader
+//! goes on, so a table written here ends with a zero entry.
 
 use anyhow::{bail, ensure};
 
 use super::writer::{read_f32, read_i32, read_rel, read_u16, read_u32, Writer};
 
 pub const TRIGGER_LOAD_MAP: u32 = 62;
+/// Stands in data 1 of a level change for the level the trigger is written into
+pub const THIS_LEVEL: u32 = 0;
+pub const TRIGGER_LEVEL_CHANGE: u32 = 0x0C;
 pub const TRIGGER_SPAWN: u32 = 0x1C;
 /// A spawn point of a multiplayer game. The game wants floor within a metre below each one: it
 /// stops for good on a level with one that has none ("SpawnPoint @ ... is not in the map")
@@ -28,6 +38,80 @@ const EDB_MAGIC: u32 = 0x47454F4D;
 const HEADER_MAPS: usize = 0x70;
 const HEADER_SECTIONS: usize = 0x40;
 const MAP_TRIGGERS: usize = 0x58;
+const SHAPE_SIZE: usize = 0x30;
+
+pub const SHAPE_BOX: u8 = 0;
+pub const SHAPE_SPHERE: u8 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TriggerShape {
+    pub hash: u32,
+    pub flags: u16,
+    pub kind: u8,
+    pub hash_index: u8,
+    pub extents: [f32; 3],
+    pub offset: [f32; 3],
+    pub rotation: [f32; 4],
+}
+
+impl TriggerShape {
+    fn new(kind: u8, extents: [f32; 3]) -> Self {
+        Self {
+            hash: u32::MAX,
+            flags: 0,
+            kind,
+            hash_index: 0,
+            extents,
+            offset: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    /// `half` is half of its sides
+    pub fn cuboid(half: [f32; 3]) -> Self {
+        Self::new(SHAPE_BOX, half)
+    }
+
+    pub fn sphere(radius: f32) -> Self {
+        Self::new(SHAPE_SPHERE, [radius, 0.0, 0.0])
+    }
+
+    /// How far from the trigger's place the shape reaches
+    pub fn reach(&self) -> f32 {
+        let [x, y, z] = self.extents;
+        match self.kind {
+            SHAPE_BOX => (x * x + y * y + z * z).sqrt(),
+            _ => x.max(y).max(z),
+        }
+    }
+
+    fn read(data: &[u8], at: usize) -> Self {
+        let vec3 = |o: usize| [read_f32(data, at + o), read_f32(data, at + o + 4), read_f32(data, at + o + 8)];
+        Self {
+            hash: read_u32(data, at),
+            flags: read_u16(data, at + 4),
+            kind: data[at + 6],
+            hash_index: data[at + 7],
+            extents: vec3(8),
+            offset: vec3(0x14),
+            rotation: [
+                read_f32(data, at + 0x20),
+                read_f32(data, at + 0x24),
+                read_f32(data, at + 0x28),
+                read_f32(data, at + 0x2C),
+            ],
+        }
+    }
+
+    fn write(&self, w: &mut Writer) {
+        w.u32(self.hash);
+        w.u16(self.flags);
+        w.bytes(&[self.kind, self.hash_index]);
+        w.f32s(&self.extents);
+        w.f32s(&self.offset);
+        w.f32s(&self.rotation);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GeTrigger {
@@ -44,6 +128,9 @@ pub struct GeTrigger {
     /// The engine's values: visual object, its file, script index, collision index, colour, ...
     pub engine: [Option<u32>; 8],
     pub link_ref: i32,
+    /// A shape that isn't in the file yet: writing the trigger adds it to the table and points
+    /// engine value 3 at it
+    pub shape: Option<TriggerShape>,
 }
 
 impl GeTrigger {
@@ -60,6 +147,7 @@ impl GeTrigger {
             links: [None; 8],
             engine: [None; 8],
             link_ref: -1,
+            shape: None,
         }
     }
 
@@ -104,9 +192,12 @@ impl GeTrigger {
 #[derive(Clone, Debug)]
 pub struct TriggerSet {
     pub triggers: Vec<GeTrigger>,
+    /// The file's collisions, as far as its triggers use them
+    pub shapes: Vec<TriggerShape>,
     map: usize,
     scripts: Option<usize>,
     collisions: Option<usize>,
+    file_shapes: usize,
 }
 
 impl TriggerSet {
@@ -160,9 +251,11 @@ pub fn read_triggers(data: &[u8]) -> anyhow::Result<TriggerSet> {
     let Some(header) = read_rel(data, map + MAP_TRIGGERS) else {
         return Ok(TriggerSet {
             triggers: vec![],
+            shapes: vec![],
             map,
             scripts: None,
             collisions: None,
+            file_shapes: 0,
         });
     };
     ensure!(header + 0x14 <= data.len(), "the trigger header is cut short");
@@ -200,6 +293,7 @@ pub fn read_triggers(data: &[u8]) -> anyhow::Result<TriggerSet> {
                 links: [None; 8],
                 engine: [None; 8],
                 link_ref: read_i32(data, entry + 4),
+                shape: None,
             };
             let mut value = at + 0x30;
             for bit in 0..32 {
@@ -218,8 +312,17 @@ pub fn read_triggers(data: &[u8]) -> anyhow::Result<TriggerSet> {
         }
     }
 
+    let used = triggers.iter().filter_map(|t| t.engine[3]).map(|i| i as usize + 1).max().unwrap_or(0);
+    let mut shapes = vec![];
+    if let Some(table) = collisions.filter(|_| used > 0) {
+        ensure!(used < 0x10000 && table + used * SHAPE_SIZE <= data.len(), "the trigger collisions are cut short");
+        shapes = (0..used).map(|i| TriggerShape::read(data, table + i * SHAPE_SIZE)).collect();
+    }
+
     Ok(TriggerSet {
         triggers,
+        file_shapes: shapes.len(),
+        shapes,
         map,
         scripts,
         collisions,
@@ -241,9 +344,24 @@ pub fn write_triggers(data: &[u8], set: &TriggerSet) -> anyhow::Result<Vec<u8>> 
         bail!("too many triggers");
     }
 
+    // the shapes still to be written: at the end of the table
+    let mut shapes = set.shapes.clone();
+    let mut triggers = set.triggers.clone();
+    for trigger in &mut triggers {
+        if let Some(shape) = trigger.shape.take() {
+            trigger.engine[3] = Some(shapes.len() as u32);
+            shapes.push(shape);
+        }
+        if trigger.type_id == TRIGGER_LEVEL_CHANGE && trigger.data[1] == Some(THIS_LEVEL) {
+            trigger.data[1] = Some(read_u32(data, 4));
+        }
+    }
+    let shapes_changed = shapes.len() != set.file_shapes
+        || set.collisions.is_some_and(|table| (0..shapes.len()).any(|i| shapes[i] != TriggerShape::read(data, table + i * SHAPE_SIZE)));
+
     let mut types: Vec<(u32, u32)> = vec![];
     let mut type_of = vec![];
-    for trigger in &set.triggers {
+    for trigger in &triggers {
         let key = (trigger.type_id, trigger.subtype);
         let index = match types.iter().position(|t| *t == key) {
             Some(i) => i,
@@ -259,15 +377,14 @@ pub fn write_triggers(data: &[u8], set: &TriggerSet) -> anyhow::Result<Vec<u8>> 
     w.bytes(data);
     w.align(16);
     let header = w.pos();
-    w.u32(set.triggers.len() as u32);
+    w.u32(triggers.len() as u32);
     let p_list = w.rel();
     let p_scripts = w.rel();
     let p_types = w.rel();
     let p_collisions = w.rel();
 
     w.point_here(p_list);
-    let entries: Vec<usize> = set
-        .triggers
+    let entries: Vec<usize> = triggers
         .iter()
         .map(|t| {
             let at = w.rel();
@@ -275,7 +392,7 @@ pub fn write_triggers(data: &[u8], set: &TriggerSet) -> anyhow::Result<Vec<u8>> 
             at
         })
         .collect();
-    for ((trigger, entry), type_index) in set.triggers.iter().zip(entries).zip(type_of) {
+    for ((trigger, entry), type_index) in triggers.iter().zip(entries).zip(type_of) {
         w.point_here(entry);
         w.u16(type_index);
         w.u16(trigger.debug);
@@ -302,11 +419,22 @@ pub fn write_triggers(data: &[u8], set: &TriggerSet) -> anyhow::Result<Vec<u8>> 
         w.u32(*subtype);
         w.zeros(8);
     }
-    // the scripts and the collisions stay where they are. a file without them: zeros
+    // the scripts stay where they are, the collisions too unless they changed. a file without
+    // them: zeros
     let nothing = w.pos();
     w.zeros(16);
     w.point(p_scripts, set.scripts.unwrap_or(nothing));
-    w.point(p_collisions, set.collisions.unwrap_or(nothing));
+    if shapes_changed {
+        w.align(16);
+        let table = w.pos();
+        for shape in &shapes {
+            shape.write(&mut w);
+        }
+        w.zeros(SHAPE_SIZE);
+        w.point(p_collisions, table);
+    } else {
+        w.point(p_collisions, set.collisions.unwrap_or(nothing));
+    }
     w.align(32);
 
     w.point(map + MAP_TRIGGERS, header);
@@ -338,4 +466,36 @@ pub fn write_triggers(data: &[u8], set: &TriggerSet) -> anyhow::Result<Vec<u8>> 
     }
 
     Ok(w.buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::geomap::build_empty_file;
+    use super::*;
+
+    #[test]
+    fn shapes_are_added_and_kept() {
+        let empty = build_empty_file(0x01810001, 0, &[], &[]);
+        let mut set = read_triggers(&empty).unwrap();
+        let mut boxed = GeTrigger::new(0x13, [1.0, 2.0, 3.0]);
+        boxed.shape = Some(TriggerShape::cuboid([4.0, 5.0, 6.0]));
+        set.triggers.push(boxed);
+        let once = write_triggers(&empty, &set).unwrap();
+
+        let mut read = read_triggers(&once).unwrap();
+        assert_eq!(read.triggers[0].engine[3], Some(0));
+        assert_eq!(read.shapes, vec![TriggerShape::cuboid([4.0, 5.0, 6.0])]);
+
+        // the next one goes behind it, and writing again changes neither
+        let mut ball = GeTrigger::new(0x10, [0.0; 3]);
+        ball.shape = Some(TriggerShape::sphere(2.0));
+        read.triggers.push(ball);
+        let twice = write_triggers(&once, &read).unwrap();
+        let read = read_triggers(&twice).unwrap();
+        assert_eq!(read.triggers[1].engine[3], Some(1));
+        assert_eq!(read.shapes[0], TriggerShape::cuboid([4.0, 5.0, 6.0]));
+        assert_eq!(read.shapes[1], TriggerShape::sphere(2.0));
+        let again = read_triggers(&write_triggers(&twice, &read).unwrap()).unwrap();
+        assert_eq!(again.shapes, read.shapes);
+    }
 }

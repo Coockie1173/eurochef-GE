@@ -21,6 +21,13 @@
 //! starts with `sky` is the sky, with everything below it: drawn where it stands whichever room
 //! the camera is in, never collided with and not shaded by the importer's light.
 //!
+//! A node whose name starts with `volume_` isn't drawn or collided with: it is a trigger volume
+//! (see `volumes`), a box around its mesh turned as the node is, or for an empty the box Blender
+//! draws for a cube empty.
+//!
+//! A node whose name starts with `bhop_` is no place: its words are the level's own bunnyhop
+//! rules, which the port plays by in that level (see `volumes`): `bhop_speed6_gravity0.8`.
+//!
 //! A mesh or node whose name starts with `vault`, `vault_long` or `climb` isn't drawn or collided
 //! with: it stands for the top of an obstacle (a quad or a box that ends where the obstacle's top
 //! does) and the rim of its faces that look up become the edges the player vaults over (about
@@ -48,6 +55,7 @@ use anyhow::Context;
 use image::RgbaImage;
 
 use super::{
+    volumes::{rotation_from_axes, volume_of_name, SceneVolume, VolumeKind},
     geomap::{ladder_of, rim_edges, GeScene, ModeItemKind, SceneModeItem, ScenePortal, SceneSpawn, SceneTriangle, EDGE_CLIMB, EDGE_LADDER_TOP, EDGE_LONG_VAULT, EDGE_VAULT},
     mesh::{GeVertex, COLOUR_ONE},
     texture::GeTexture,
@@ -610,6 +618,15 @@ impl Importer<'_> {
             return Ok(());
         }
         let matrix = multiply(parent, &node.transform().matrix());
+        if let Some(words) = node.name().and_then(|n| n.to_lowercase().strip_prefix("bhop_").map(str::to_string)) {
+            self.scene.bhop.get_or_insert_with(Default::default).read_words(node.name().unwrap_or(""), &words)?;
+            return Ok(());
+        }
+        if let Some((kind, sphere)) = volume_of_name(node.name().unwrap_or(""))? {
+            let volume = self.volume(node, &matrix, kind, sphere)?;
+            self.scene.volumes.push(volume);
+            return Ok(());
+        }
         if let Some((hash, number, nth)) = self.options.parts.then(|| point_of_name(node.name())).flatten() {
             let p = transform_point(&matrix, [0.0, 0.0, 0.0]);
             let scale = self.options.scale;
@@ -691,6 +708,63 @@ impl Importer<'_> {
             self.node(&child, &matrix, part)?;
         }
         Ok(())
+    }
+
+    /// The box a `volume_...` node stands for, in the game's space
+    fn volume(
+        &self,
+        node: &gltf::Node<'_>,
+        matrix: &[[f32; 4]; 4],
+        kind: VolumeKind,
+        sphere: bool,
+    ) -> anyhow::Result<SceneVolume> {
+        let name = node.name().unwrap_or("volume").to_string();
+        let (mut low, mut high) = ([f32::MAX; 3], [f32::MIN; 3]);
+        if let Some(mesh) = node.mesh() {
+            for primitive in mesh.primitives() {
+                let reader = primitive.reader(|b| self.buffers.get(b.index()).map(|d| d.0.as_slice()));
+                for p in reader.read_positions().into_iter().flatten() {
+                    for k in 0..3 {
+                        low[k] = low[k].min(p[k]);
+                        high[k] = high[k].max(p[k]);
+                    }
+                }
+            }
+            anyhow::ensure!(low[0] <= high[0], "{name}: its mesh has no vertices");
+        } else {
+            (low, high) = ([-1.0; 3], [1.0; 3]);
+        }
+        let scale = self.options.scale;
+        let centre = transform_point(matrix, [0, 1, 2].map(|k| (low[k] + high[k]) * 0.5));
+        let mut half = [0.0; 3];
+        let mut axes = [[0.0; 3]; 3];
+        for k in 0..3 {
+            let axis = [matrix[k][0], matrix[k][1], matrix[k][2]];
+            let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            anyhow::ensure!(length > 1e-6, "{name}: its node is scaled to nothing");
+            half[k] = (high[k] - low[k]) * 0.5 * length * scale;
+            // mirrored as everything is, the box's own x with it
+            let flip = if k == 0 { -1.0 } else { 1.0 };
+            axes[k] = [-axis[0] * flip / length, axis[1] * flip / length, axis[2] * flip / length];
+        }
+        let cross = [
+            axes[0][1] * axes[1][2] - axes[0][2] * axes[1][1],
+            axes[0][2] * axes[1][0] - axes[0][0] * axes[1][2],
+            axes[0][0] * axes[1][1] - axes[0][1] * axes[1][0],
+        ];
+        // scaled by a negative number: the box is the same turned the other way around
+        if cross[0] * axes[2][0] + cross[1] * axes[2][1] + cross[2] * axes[2][2] < 0.0 {
+            axes[2] = axes[2].map(|v| -v);
+        }
+        anyhow::ensure!(half.iter().all(|h| *h > 0.0) || sphere, "{name}: a volume can't be flat");
+        Ok(SceneVolume {
+            name,
+            kind,
+            sphere,
+            position: [-centre[0] * scale, centre[1] * scale, centre[2] * scale],
+            half,
+            rotation: rotation_from_axes(axes),
+        })
     }
 
     /// A room for the rooms' (or parts') id, the one it already has or a new one
